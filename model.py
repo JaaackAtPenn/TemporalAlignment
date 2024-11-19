@@ -105,12 +105,51 @@ class BaseModel(nn.Module):
     
 class ModelWrapper(nn.Module):
     def __init__(self):
-        super().__init__()
+        super(ModelWrapper, self).__init__()
+
         self.cnn = BaseModel()
         self.emb = ConvEmbedder()
-        
-        
 
+    def forward(self, data):
+        print(f"LitModel input frames shape: {data.shape}")
+        
+        # Pass through resnet50
+        cnn_feats = self.cnn(data)
+        print(f"LitModel after CNN shape: {cnn_feats.shape}")
+
+        # stack features
+        context_frames = 3
+        batch_size, num_frames, channels, feature_h, feature_w = cnn_feats.shape
+        num_context = num_frames // context_frames
+        cnn_feats = cnn_feats[:, :num_context*context_frames, :, :, :]
+        cnn_feats = cnn_feats.reshape(batch_size * num_context, context_frames, channels, feature_h, feature_w)
+
+        # cnn_feats = cnn_feats.view(batch_size*num_context, context_frames, channels, feature_h, feature_w)
+        print(f"LitModel after stacking shape: {cnn_feats.shape}")
+
+        # Pass CNN features through Embedder
+        embs = self.emb(cnn_feats)
+        print(f"LitModel after embedder shape: {embs.shape}")
+
+        # Reshape to (batch_size, num_frames, embedding_dim)
+        channels = embs.shape[-1]
+        embs = embs.view(batch_size, num_context, channels)
+        
+        return embs
+    
+    def load_state_dict(self, state_dict):
+        # Convert keys from 'cnn.' prefix to 'cnn' dict
+        # Create new state dict without 'model.' prefix
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('model.'):
+                new_key = key[6:]  # Remove 'model.' prefix
+                new_state_dict[new_key] = value
+            else:
+                new_state_dict[key] = value
+                
+        # Call parent class implementation with cleaned state dict
+        super().load_state_dict(new_state_dict)
 
 def test_baseModel():
     dummy_input = torch.randn(4, 9, 3, 224, 224)  # 4 videos, 10 frames each
@@ -132,7 +171,7 @@ def test_algorithm():
     dummy_data = {
     'frames': torch.randn(4, 9, 3, 224, 224)
 }
-    model = Algorithm()
+    model = ModelWrapper()
     output = model(dummy_data)
     print("Output shape:", output.shape)  # Expected: [batch_size, num_frames//3, embedding_dim]
 

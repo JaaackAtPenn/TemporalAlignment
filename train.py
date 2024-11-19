@@ -100,37 +100,14 @@ class LitModel(pl.LightningModule):
 
 
     def forward(self, frames):
-        print(f"LitModel input frames shape: {frames.shape}")
-        
-        # Pass through resnet50
-        cnn_feats = self.model.cnn(frames)
-        print(f"LitModel after CNN shape: {cnn_feats.shape}")
-
-        # stack features
-        context_frames = 3
-        batch_size, num_frames, channels, feature_h, feature_w = cnn_feats.shape
-        num_context = num_frames // context_frames
-        cnn_feats = cnn_feats[:, :num_context*context_frames, :, :, :]
-        cnn_feats = cnn_feats.reshape(batch_size * num_context, context_frames, channels, feature_h, feature_w)
-
-        # cnn_feats = cnn_feats.view(batch_size*num_context, context_frames, channels, feature_h, feature_w)
-        print(f"LitModel after stacking shape: {cnn_feats.shape}")
-
-        # Pass CNN features through Embedder
-        embs = self.model.emb(cnn_feats)
-        print(f"LitModel after embedder shape: {embs.shape}")
-
-        # Reshape to (batch_size, num_frames, embedding_dim)
-        channels = embs.shape[-1]
-        embs = embs.view(batch_size, num_context, channels)
-
+        embs = self.model(frames)
         return embs
 
 def train():
     print("Starting training process...")
     print("Loading video files...")
-    video_dir = Path('data/videos')
-    video_files = list(video_dir.glob('*.mp4'))[:10]
+    video_dir = Path('../videos_160')
+    video_files = list(video_dir.glob('*.mp4'))[:100]
     print(f"Found {len(video_files)} video files")
 
     # Split into train/val sets

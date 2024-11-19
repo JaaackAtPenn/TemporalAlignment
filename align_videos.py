@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Tuple, Union
 from tqdm import tqdm
 
-from model import Encoder
-from align import get_scaled_similarity, align_pair_of_sequences
+from model import ModelWrapper
+from losses import get_scaled_similarity, align_pair_of_sequences
 
 
 def load_video(video_path: str) -> Tuple[np.ndarray, int, int]:
@@ -125,7 +125,8 @@ def main():
     import torchvision.models as models
     
     # Load feature extraction model
-    model = Encoder()
+    model = ModelWrapper()
+    model.load_state_dict(torch.load("checkpoints/model-epoch=09-val_loss=2.17.ckpt")['state_dict'])
     model.eval()
     
     if torch.cuda.is_available():
@@ -133,8 +134,8 @@ def main():
     
     # Align videos
     align_videos(
-        video1_path='path/to/video1.mp4',
-        video2_path='path/to/video2.mp4',
+        video1_path='../videos_160/0.mp4',
+        video2_path='../videos_160/1.mp4',
         model=model,
         output_path='aligned_videos.mp4',
         display=True  # Set to False to only save without displaying
