@@ -6,7 +6,9 @@ from typing import Tuple, Union
 from tqdm import tqdm
 
 from model import ModelWrapper
-from losses import get_scaled_similarity, align_pair_of_sequences
+from losses import align_pair_of_sequences
+
+from typing import List, Tuple
 
 
 def load_video(video_path: str) -> Tuple[np.ndarray, int, int]:
@@ -25,45 +27,108 @@ def load_video(video_path: str) -> Tuple[np.ndarray, int, int]:
     
     return np.array(frames), fps, frame_count
 
-
-def extract_features(frames: np.ndarray, model: torch.nn.Module) -> torch.Tensor:
-    """Extract features from video frames using provided model."""
-    device = next(model.parameters()).device
-    features = []
-    
-    for frame in frames:
-        # Preprocess frame (adjust as needed for your model)
-        frame = cv2.resize(frame, (224, 224))
-        frame = torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0
-        frame = frame.unsqueeze(0).to(device)
-        
-        # Extract features
-        with torch.no_grad():
-            feat = model(frame)
-        features.append(feat.cpu())
-    
-    return torch.cat(features, dim=0)
-
-
-def align_videos(
-    video1_path: str,
-    video2_path: str,
-    model: torch.nn.Module,
-    output_path: str,
-    similarity_type: str = 'cosine',
-    temperature: float = 0.1,
-    display: bool = False
-) -> None:
-    """Align two videos and save or display the result.
+def extract_features(frames: np.ndarray, model: ModelWrapper) -> torch.Tensor:
+    """Extract features from video frames using the provided model.
     
     Args:
-        video1_path: Path to first video
-        video2_path: Path to second video
-        model: Feature extraction model
+        frames: Video frames of shape [T, H, W, C] 
+        model: ModelWrapper instance for feature extraction
+        
+    Returns:
+        Tensor of features with shape [T//3, embedding_dim]
+    """
+    # Convert frames to torch tensor and normalize
+    frames = torch.from_numpy(frames).float()
+    frames = frames.permute(0, 3, 1, 2)  # [T,H,W,C] -> [T,C,H,W]
+    frames = frames / 255.0  # Normalize to [0,1]
+    
+    # Add batch dimension
+    frames = frames.unsqueeze(0)  # [1,T,C,H,W]
+    
+    # Move to GPU if available
+    if torch.cuda.is_available():
+        frames = frames.cuda()
+        
+    # Extract features
+    with torch.no_grad():
+        features = model(frames)  # [1,T//3,embedding_dim]
+        
+    # Remove batch dimension
+    features = features.squeeze(0)  # [T//3,embedding_dim]
+    
+    return features
+
+def create_side_by_side_frame(frame1: np.ndarray, frame2: np.ndarray) -> np.ndarray:
+    """Combine two frames side by side.
+    
+    Args:
+        frame1: First frame
+        frame2: Second frame
+    Returns:
+        Combined frame
+    """
+    return np.hstack((frame1, frame2))
+
+def save_video(frames: List[np.ndarray], output_path: str, fps: int, frame_size: Tuple[int, int]):
+    """Save frames as video file.
+    
+    Args:
+        frames: List of frames to save
+        output_path: Path to save video
+        fps: Frames per second
+        frame_size: (width, height) of output video
+    """
+    out = cv2.VideoWriter(
+        output_path,
+        cv2.VideoWriter_fourcc(*'mp4v'),
+        fps,
+        frame_size
+    )
+    for frame in frames:
+        out.write(frame)
+    out.release()
+
+def display_frames(frames: List[np.ndarray], fps: int):
+    """Display frames in a window.
+    
+    Args:
+        frames: List of frames to display
+        fps: Frames per second to display at
+    """
+    for frame in frames:
+        cv2.imshow('Aligned Videos', frame)
+        if cv2.waitKey(int(1000/fps)) & 0xFF == ord('q'):
+            break
+    cv2.destroyAllWindows()
+
+def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+    """Get aligned frames using computed indices.
+    
+    Args:
+        frames1: Reference video frames
+        frames2: Video frames to align
+        aligned_idxs: Tensor of aligned indices
+        
+    Returns:
+        Tuple of (reference frames, aligned frames)
+    """
+    # Extract the logits from the alignment tuple
+    aligned_idxs = torch.argmax(aligned_idxs[0], dim=1)  # Convert logits to indices by taking argmax
+    aligned_frames2 = frames2[aligned_idxs.numpy() * 3]  # Multiply by 3 since features are extracted every 3 frames
+    aligned_frames1 = frames1[::3]  # Take every 3rd frame to match feature extraction
+    
+    # Make sure frames match in count
+    min_frames = min(len(aligned_frames1), len(aligned_frames2))
+    return aligned_frames1[:min_frames], aligned_frames2[:min_frames]
+
+def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None):
+    """Align two videos using extracted features and save aligned result.
+    
+    Args:
+        video1_path: Path to reference video
+        video2_path: Path to video to be aligned
+        model: ModelWrapper instance for feature extraction
         output_path: Path to save aligned video
-        similarity_type: Type of similarity metric to use
-        temperature: Temperature for scaling similarities
-        display: Whether to display video while processing
     """
     # Load videos
     frames1, fps1, _ = load_video(video1_path)
@@ -73,51 +138,37 @@ def align_videos(
     features1 = extract_features(frames1, model)
     features2 = extract_features(frames2, model)
     
-    # Compute alignment
-    sim_matrix, _ = align_pair_of_sequences(
-        features1, features2, 
-        similarity_type=similarity_type,
-        temperature=temperature
+    # Convert features to CPU if needed
+    features1 = features1.cpu()
+    features2 = features2.cpu()
+    
+    # Align sequences
+    aligned_idxs = align_pair_of_sequences(
+        features1, 
+        features2,
+        similarity_type='cosine',
+        temperature=0.1
     )
     
-    # Get alignment indices
-    alignment_indices = torch.argmax(sim_matrix, dim=1).numpy()
+    # Get aligned frames
+    aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, aligned_idxs)
     
-    # Create output video
-    height = max(frames1.shape[1], frames2.shape[1])
-    width = frames1.shape[2] + frames2.shape[2]
-    fps = max(fps1, fps2)
-    
-    if output_path:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    
-    # Create aligned video
-    for i, idx in enumerate(tqdm(alignment_indices)):
-        # Get frames
-        frame1 = frames1[i]
-        frame2 = frames2[idx]
-        
-        # Resize frames to same height
-        frame1 = cv2.resize(frame1, (int(height * frame1.shape[1] / frame1.shape[0]), height))
-        frame2 = cv2.resize(frame2, (int(height * frame2.shape[1] / frame2.shape[0]), height))
-        
-        # Concatenate frames
-        combined = np.hstack([frame1, frame2])
-        
-        if display:
-            cv2.imshow('Aligned Videos', combined)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        
-        if output_path:
-            out.write(combined)
+    # Create side-by-side visualization
+    combined_frames = [
+        create_side_by_side_frame(f1, f2) 
+        for f1, f2 in zip(aligned_frames1, aligned_frames2)
+    ]
     
     if output_path:
-        out.release()
-    
-    if display:
-        cv2.destroyAllWindows()
+        h, w = aligned_frames1[0].shape[:2]
+        save_video(
+            combined_frames,
+            output_path,
+            fps1//3,  # Divide FPS by 3 since we're using every 3rd frame
+            (w*2, h)  # Double width for side-by-side
+        )
+
+
 
 
 def main():
@@ -137,8 +188,7 @@ def main():
         video1_path='../videos_160/0.mp4',
         video2_path='../videos_160/1.mp4',
         model=model,
-        output_path='aligned_videos.mp4',
-        display=True  # Set to False to only save without displaying
+        output_path='aligned_videos.mp4'
     )
 
 
