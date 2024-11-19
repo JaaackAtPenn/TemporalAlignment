@@ -148,7 +148,7 @@ def train():
         max_epochs=10,
         callbacks=[checkpoint_callback],
         logger=logger,
-        accelerator='cpu'
+        accelerator='gpu'
     )
     
     print("Starting model training...")

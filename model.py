@@ -123,6 +123,8 @@ class Algorithm(nn.Module):
         context_frames = 3
         batch_size, num_frames, channels, feature_h, feature_w = cnn_feats.shape
         num_context = num_frames // context_frames
+        cnn_feats = cnn_feats[:, :num_context*context_frames, :, :, :]
+
         cnn_feats = cnn_feats.view(batch_size*num_context, context_frames, channels, feature_h, feature_w)
         print(f"Algorithm after stacking shape: {cnn_feats.shape}")
 
