@@ -14,13 +14,13 @@ class ConvEmbedder(nn.Module):
         
         self.conv_layers = nn.Sequential(
             #TODO: Check kernel and padding
-            nn.Conv3d(in_channels=1024, out_channels=512, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
+            nn.Conv3d(in_channels=3, out_channels=512, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
             nn.BatchNorm3d(512),
             nn.ReLU(inplace=True),
             nn.Conv3d(in_channels=512, out_channels=512, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
             nn.BatchNorm3d(512),
             nn.ReLU(inplace=True),
-)
+        )
         
         # Pooling Layer
         self.global_pooling = nn.AdaptiveAvgPool3d((1, 1, 1))
@@ -32,21 +32,21 @@ class ConvEmbedder(nn.Module):
         self.fc_dropout = nn.Dropout(fc_dropout_rate)
 
     def forward(self, x):
-        """
-        Args:
-            x : (batch_size, context_frames, channels, height, width)
-        Returns:
-            x : (batch_size, embedding_dim)
-        """        
+        print(f"ConvEmbedder input shape: {x.shape}")
+        
         # Reshape to (batch_size, feature_channels, num_steps, height, width) for 3D Conv
         x = x.permute(0, 2, 1, 3, 4)
+        print(f"ConvEmbedder after permute shape: {x.shape}")
 
         # Apply 3D Convolutions
         x = self.conv_layers(x)
+        print(f"ConvEmbedder after conv_layers shape: {x.shape}")
         
         # Apply Global Pooling
         x = self.global_pooling(x)  # Output shape: (batch_size, channels, 1, 1, 1)
+        print(f"ConvEmbedder after pooling shape: {x.shape}")
         x = x.view(x.size(0), -1)   # Flatten to (batch_size, channels)
+        print(f"ConvEmbedder after flatten shape: {x.shape}")
         
         # Fully Connected Layers
         x = self.fc_dropout(x)
@@ -86,22 +86,20 @@ class BaseModel(nn.Module):
                     param.requires_grad = True
 
     def forward(self, x):
-        """
-        Args:
-            x: Tensor of shape [batch_size, num_frames, channels, height, width]
-        Returns:
-            Tensor of shape [batch_size, num_frames, feature_channels, feature_height, feature_width]
-        """
+        print(f"BaseModel input shape: {x.shape}")
+        
         batch_size, num_frames, channels, height, width = x.shape
         x = x.view(batch_size * num_frames, channels, height, width)
+        print(f"BaseModel after reshape shape: {x.shape}")
 
         # Extract features
-        # Shape: [batch_size * num_frames, 1024, 14, 14]
-        features = self.base_model(x)  
+        features = self.base_model(x)
+        print(f"BaseModel after base_model shape: {features.shape}")
 
         # Restore temporal dimension
         feature_channels, h, w = features.shape[1:]
         features = features.view(batch_size, num_frames, feature_channels, h, w)
+        print(f"BaseModel output shape: {features.shape}")
 
         return features
     
@@ -111,32 +109,26 @@ class Algorithm(nn.Module):
         self.model = model if model else self.get_model()
 
     def forward(self, data):
-        """
-        Args:
-            data: dict, includes 'frames' tensor (batch_size, num_frames, channels, height, width).
-            steps: Tensor, indices of chosen frames.
-            seq_lens: Tensor, sequence lengths for each video in the batch.
-            training: bool, whether the model is in training mode.
-
-        Returns:
-            embs: Tensor, embeddings of shape (batch_size, num_frames, embedding_dim).
-        """
+        print(f"Algorithm input frames shape: {data['frames'].shape}")
+        
         cnn = self.model['cnn']
         emb = self.model['emb']
 
-
         # Pass through resnet50
         frames = data['frames']
-        cnn_feats = cnn(frames) 
+        cnn_feats = cnn(frames)
+        print(f"Algorithm after CNN shape: {cnn_feats.shape}")
 
         # stack features
         context_frames = 3
         batch_size, num_frames, channels, feature_h, feature_w = cnn_feats.shape
         num_context = num_frames // context_frames
         cnn_feats = cnn_feats.view(batch_size*num_context, context_frames, channels, feature_h, feature_w)
+        print(f"Algorithm after stacking shape: {cnn_feats.shape}")
 
         # Pass CNN features through Embedder
         embs = emb(cnn_feats)
+        print(f"Algorithm after embedder shape: {embs.shape}")
 
         # Reshape to (batch_size, num_frames, embedding_dim)
         channels = embs.shape[-1]

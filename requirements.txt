@@ -1,0 +1,10 @@
+lightning-utilities
+numpy
+opencv-python
+pillow
+pytorch-lightning
+tensorboard
+torch
+torchmetrics
+torchvision
+tqdm

@@ -1,0 +1,9 @@
+data/videos/
+data/frames/
+lightning_logs/
+checkpoints/
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
