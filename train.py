@@ -8,7 +8,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader, Dataset
 # from torchvision.datasets import ImageFolder
 # from torchvision.transforms import ToTensor
-from model import ConvEmbedder
+from model import ConvEmbedder, BaseModel, ModelWrapper
 from losses import compute_alignment_loss
 from util import video_to_frames
 from pathlib import Path
@@ -62,19 +62,16 @@ def collate_fn(batch):
     return padded_batch
 
 class LitModel(pl.LightningModule):
-    def __init__(self):
+    def __init__(self, model=None):
         super().__init__()
         print("Initializing LitModel...")
-        self.model = ConvEmbedder()
-        
-    def forward(self, x):
-        return self.model(x)
-        
+        self.model = model if model else ModelWrapper()
+                
     def training_step(self, batch, batch_idx):
         print(f"\nTraining step {batch_idx}")
         print(f"Input batch shape: {batch.shape}")
         x = batch
-        y_hat = self.model(x)
+        y_hat = self(x)
         print(f"Output shape: {y_hat.shape}")
         loss = compute_alignment_loss(y_hat, batch_size=x.shape[0])
         print(f"Training loss: {loss.item():.4f}")
@@ -86,16 +83,48 @@ class LitModel(pl.LightningModule):
         print(f"Input batch shape: {batch.shape}")
         x = batch
         with torch.no_grad():
-            y_hat = self.model(x)
+            y_hat = self(x)
         print(f"Output shape: {y_hat.shape}")
         loss = compute_alignment_loss(y_hat, batch_size=x.shape[0])
         print(f"Validation loss: {loss.item():.4f}")
         self.log('val_loss', loss)
+        return loss
         
     def configure_optimizers(self):
         print("Configuring optimizer...")
-        optimizer = optim.Adam(self.parameters())
-        return optimizer
+        parameters = list(self.model.cnn.parameters()) + list(self.model.emb.parameters())
+        # TODO: use config file to manage the configs
+        optimizer = optim.Adam(parameters, lr=1e-4)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.97)
+        return [optimizer], [scheduler]
+
+
+    def forward(self, frames):
+        print(f"LitModel input frames shape: {frames.shape}")
+        
+        # Pass through resnet50
+        cnn_feats = self.model.cnn(frames)
+        print(f"LitModel after CNN shape: {cnn_feats.shape}")
+
+        # stack features
+        context_frames = 3
+        batch_size, num_frames, channels, feature_h, feature_w = cnn_feats.shape
+        num_context = num_frames // context_frames
+        cnn_feats = cnn_feats[:, :num_context*context_frames, :, :, :]
+        cnn_feats = cnn_feats.reshape(batch_size * num_context, context_frames, channels, feature_h, feature_w)
+
+        # cnn_feats = cnn_feats.view(batch_size*num_context, context_frames, channels, feature_h, feature_w)
+        print(f"LitModel after stacking shape: {cnn_feats.shape}")
+
+        # Pass CNN features through Embedder
+        embs = self.model.emb(cnn_feats)
+        print(f"LitModel after embedder shape: {embs.shape}")
+
+        # Reshape to (batch_size, num_frames, embedding_dim)
+        channels = embs.shape[-1]
+        embs = embs.view(batch_size, num_context, channels)
+
+        return embs
 
 def train():
     print("Starting training process...")

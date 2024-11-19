@@ -14,7 +14,7 @@ class ConvEmbedder(nn.Module):
         
         self.conv_layers = nn.Sequential(
             #TODO: Check kernel and padding
-            nn.Conv3d(in_channels=3, out_channels=512, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
+            nn.Conv3d(in_channels=1024, out_channels=512, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
             nn.BatchNorm3d(512),
             nn.ReLU(inplace=True),
             nn.Conv3d(in_channels=512, out_channels=512, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
@@ -103,55 +103,13 @@ class BaseModel(nn.Module):
 
         return features
     
-class Algorithm(nn.Module):
-    def __init__(self, model=None):
-        super(Algorithm, self).__init__()
-        self.model = model if model else self.get_model()
-
-    def forward(self, data):
-        print(f"Algorithm input frames shape: {data['frames'].shape}")
+class ModelWrapper(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.cnn = BaseModel()
+        self.emb = ConvEmbedder()
         
-        cnn = self.model['cnn']
-        emb = self.model['emb']
-
-        # Pass through resnet50
-        frames = data['frames']
-        cnn_feats = cnn(frames)
-        print(f"Algorithm after CNN shape: {cnn_feats.shape}")
-
-        # stack features
-        context_frames = 3
-        batch_size, num_frames, channels, feature_h, feature_w = cnn_feats.shape
-        num_context = num_frames // context_frames
-        cnn_feats = cnn_feats[:, :num_context*context_frames, :, :, :]
-
-        cnn_feats = cnn_feats.view(batch_size*num_context, context_frames, channels, feature_h, feature_w)
-        print(f"Algorithm after stacking shape: {cnn_feats.shape}")
-
-        # Pass CNN features through Embedder
-        embs = emb(cnn_feats)
-        print(f"Algorithm after embedder shape: {embs.shape}")
-
-        # Reshape to (batch_size, num_frames, embedding_dim)
-        channels = embs.shape[-1]
-        embs = embs.view(-1, num_context, channels)
-
-        return embs
-
-
-    def get_model(self):
-        """
-        Returns:
-            model: dict containing cnn (BaseModel) and emb (EmbedderModel).
-        """
-        model = {}
-        cnn = BaseModel()
-        emb = ConvEmbedder()
-        model['cnn'] = cnn
-        model['emb'] = emb
-
-        return model
-
+        
 
 
 def test_baseModel():
