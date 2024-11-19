@@ -38,6 +38,13 @@ def video_to_frames(video_path, target_size=(160, 160), downsample_factor=10):
     cap.release()
     
     # Convert list of frames to numpy array
-    return np.array(frames)
+    frames = np.array(frames)
+    
+    # Trim frames to ensure count is divisible by 3
+    remainder = len(frames) % 3
+    if remainder != 0:
+        frames = frames[:-remainder]
+    
+    return frames
 
 
