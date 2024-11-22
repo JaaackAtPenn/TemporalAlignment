@@ -32,21 +32,16 @@ class ConvEmbedder(nn.Module):
         self.fc_dropout = nn.Dropout(fc_dropout_rate)
 
     def forward(self, x):
-        print(f"ConvEmbedder input shape: {x.shape}")
         
         # Reshape to (batch_size, feature_channels, num_steps, height, width) for 3D Conv
         x = x.permute(0, 2, 1, 3, 4)
-        print(f"ConvEmbedder after permute shape: {x.shape}")
 
         # Apply 3D Convolutions
         x = self.conv_layers(x)
-        print(f"ConvEmbedder after conv_layers shape: {x.shape}")
         
         # Apply Global Pooling
         x = self.global_pooling(x)  # Output shape: (batch_size, channels, 1, 1, 1)
-        print(f"ConvEmbedder after pooling shape: {x.shape}")
         x = x.view(x.size(0), -1)   # Flatten to (batch_size, channels)
-        print(f"ConvEmbedder after flatten shape: {x.shape}")
         
         # Fully Connected Layers
         x = self.fc_dropout(x)
@@ -85,21 +80,16 @@ class BaseModel(nn.Module):
                 for param in m.parameters():
                     param.requires_grad = True
 
-    def forward(self, x):
-        print(f"BaseModel input shape: {x.shape}")
-        
+    def forward(self, x):        
         batch_size, num_frames, channels, height, width = x.shape
         x = x.view(batch_size * num_frames, channels, height, width)
-        print(f"BaseModel after reshape shape: {x.shape}")
 
         # Extract features
         features = self.base_model(x)
-        print(f"BaseModel after base_model shape: {features.shape}")
 
         # Restore temporal dimension
         feature_channels, h, w = features.shape[1:]
         features = features.view(batch_size, num_frames, feature_channels, h, w)
-        print(f"BaseModel output shape: {features.shape}")
 
         return features
     
@@ -111,11 +101,9 @@ class ModelWrapper(nn.Module):
         self.emb = ConvEmbedder()
 
     def forward(self, data):
-        print(f"LitModel input frames shape: {data.shape}")
         
         # Pass through resnet50
         cnn_feats = self.cnn(data)
-        print(f"LitModel after CNN shape: {cnn_feats.shape}")
 
         # stack features
         context_frames = 3
@@ -124,12 +112,8 @@ class ModelWrapper(nn.Module):
         cnn_feats = cnn_feats[:, :num_context*context_frames, :, :, :]
         cnn_feats = cnn_feats.reshape(batch_size * num_context, context_frames, channels, feature_h, feature_w)
 
-        # cnn_feats = cnn_feats.view(batch_size*num_context, context_frames, channels, feature_h, feature_w)
-        print(f"LitModel after stacking shape: {cnn_feats.shape}")
-
         # Pass CNN features through Embedder
         embs = self.emb(cnn_feats)
-        print(f"LitModel after embedder shape: {embs.shape}")
 
         # Reshape to (batch_size, num_frames, embedding_dim)
         channels = embs.shape[-1]

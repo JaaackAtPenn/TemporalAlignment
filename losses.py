@@ -62,9 +62,11 @@ def regression_loss(logits, labels, num_steps, steps, seq_lens, loss_type,
 
 def pairwise_l2_distance(embs1, embs2):
     """Computes pairwise distances between all rows of embs1 and embs2."""
-    norm1 = torch.sum(embs1 ** 2, dim=1).unsqueeze(1)  # [N1, 1]
-    norm2 = torch.sum(embs2 ** 2, dim=1).unsqueeze(0)  # [1, N2]
-    dist = torch.clamp(norm1 + norm2 - 2.0 * torch.mm(embs1, embs2.t()), min=0.0)
+    # norm1 = torch.sum(embs1 ** 2, dim=1).unsqueeze(0)  # [N1, 1]
+    # norm2 = torch.sum(embs2 ** 2, dim=1).unsqueeze(1)  # [1, N2]
+    # dist = torch.clamp(norm1 + norm2 - 2.0 * torch.mm(embs1, embs2.t()), min=0.0)
+    diff = embs1.unsqueeze(1) - embs2.unsqueeze(0)
+    dist = -torch.sum(diff ** 2, dim=2)
     return dist      # [N1, N2], every element is the squared L2 distance between a pair of embeddings
 
 def get_scaled_similarity(embs1, embs2, similarity_type, temperature):

@@ -6,10 +6,12 @@ from typing import Tuple, Union
 from tqdm import tqdm
 
 from model import ModelWrapper
-from losses import align_pair_of_sequences
+from losses import get_scaled_similarity
 
 from typing import List, Tuple
 
+import os
+import re
 
 def load_video(video_path: str) -> Tuple[np.ndarray, int, int]:
     """Load video and return frames, fps, and frame count."""
@@ -111,15 +113,12 @@ def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: t
         
     Returns:
         Tuple of (reference frames, aligned frames)
-    """
+    """    
     # Extract the logits from the alignment tuple
-    aligned_idxs = torch.argmax(aligned_idxs[0], dim=1)  # Convert logits to indices by taking argmax
     aligned_frames2 = frames2[aligned_idxs.numpy() * 3]  # Multiply by 3 since features are extracted every 3 frames
     aligned_frames1 = frames1[::3]  # Take every 3rd frame to match feature extraction
-    
     # Make sure frames match in count
-    min_frames = min(len(aligned_frames1), len(aligned_frames2))
-    return aligned_frames1[:min_frames], aligned_frames2[:min_frames]
+    return aligned_frames1, aligned_frames2
 
 def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None):
     """Align two videos using extracted features and save aligned result.
@@ -141,17 +140,13 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
     # Convert features to CPU if needed
     features1 = features1.cpu()
     features2 = features2.cpu()
-    
-    # Align sequences
-    aligned_idxs = align_pair_of_sequences(
-        features1, 
-        features2,
-        similarity_type='cosine',
-        temperature=0.1
-    )
+
+    # Compute similarities between embs1 and embs2
+    dist = get_scaled_similarity(features1, features2, 'l2', 0.1)       # [N1, N2]
+    matches = dist.argmin(1)
     
     # Get aligned frames
-    aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, aligned_idxs)
+    aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, matches)
     
     # Create side-by-side visualization
     combined_frames = [
@@ -176,17 +171,26 @@ def main():
     import torchvision.models as models
     
     # Load feature extraction model
-    model = ModelWrapper()
-    model.load_state_dict(torch.load("checkpoints/model-epoch=09-val_loss=2.17.ckpt")['state_dict'])
+    model = ModelWrapper()  
+
+    # Find the checkpoint with the smallest val_loss
+    checkpoint_dir = 'checkpoints'
+    checkpoint_files = os.listdir(checkpoint_dir)
+    checkpoint_files = [file for file in checkpoint_files if file.startswith('model-') and file.endswith('.ckpt')]
+    checkpoint_files.sort(key=lambda x: float(re.search(r'epoch=([0-9])', x).group(1)), reverse=True)
+
+    # Load the checkpoint with the smallest val_loss
+    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_files[0])
+    model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
     model.eval()
-    
+
     if torch.cuda.is_available():
         model = model.cuda()
     
     # Align videos
     align_videos(
         video1_path='../videos_160/0.mp4',
-        video2_path='../videos_160/1.mp4',
+        video2_path='../videos_160/2.mp4',
         model=model,
         output_path='aligned_videos.mp4'
     )
