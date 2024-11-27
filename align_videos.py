@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Union
 from tqdm import tqdm
-
+import matplotlib.pyplot as plt
 from model import ModelWrapper
 from losses import get_scaled_similarity
 
@@ -12,6 +12,10 @@ from typing import List, Tuple
 
 import os
 import re
+import seaborn as sns
+
+# Use dynamic time warping to find the minimum cost assignment
+from dtw import dtw
 
 def load_video(video_path: str) -> Tuple[np.ndarray, int, int]:
     """Load video and return frames, fps, and frame count."""
@@ -103,7 +107,7 @@ def display_frames(frames: List[np.ndarray], fps: int):
             break
     cv2.destroyAllWindows()
 
-def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, index1: np.ndarray, index2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Get aligned frames using computed indices.
     
     Args:
@@ -115,8 +119,8 @@ def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: t
         Tuple of (reference frames, aligned frames)
     """    
     # Extract the logits from the alignment tuple
-    aligned_frames2 = frames2[aligned_idxs.numpy() * 3]  # Multiply by 3 since features are extracted every 3 frames
-    aligned_frames1 = frames1[::3]  # Take every 3rd frame to match feature extraction
+    aligned_frames2 = frames2[index2*3]  # Multiply by 3 since features are extracted every 3 frames
+    aligned_frames1 = frames1[index1*3]  # Take every 3rd frame to match feature extraction
     # Make sure frames match in count
     return aligned_frames1, aligned_frames2
 
@@ -143,10 +147,20 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
 
     # Compute similarities between embs1 and embs2
     dist = get_scaled_similarity(features1, features2, 'l2', 0.1)       # [N1, N2]
-    matches = dist.argmin(1)
+
+    # Find the minimum cost assignment using dynamic time warping
+    dtw_result = dtw(features1, features2, dist_method='euclidean')
+
+    index1, index2 = dtw_result.index1, dtw_result.index2
+
+    # Make a heat map of dist
+    plt.figure(figsize=(10, 10))
+    sns.heatmap(-dist, cmap='coolwarm')
+    plt.title('Similarity Heatmap')
+    plt.savefig(output_path + '.png')
     
     # Get aligned frames
-    aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, matches)
+    aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, index1, index2)
     
     # Create side-by-side visualization
     combined_frames = [
@@ -177,8 +191,8 @@ def main():
     checkpoint_dir = 'checkpoints'
     checkpoint_files = os.listdir(checkpoint_dir)
     checkpoint_files = [file for file in checkpoint_files if file.startswith('model-') and file.endswith('.ckpt')]
-    checkpoint_files.sort(key=lambda x: float(re.search(r'epoch=([0-9])', x).group(1)), reverse=True)
-
+    checkpoint_files.sort(key=lambda x: float(re.search(r'epoch=([0-9]*)', x).group(1)), reverse=True)
+    print( checkpoint_files[0] )
     # Load the checkpoint with the smallest val_loss
     checkpoint_path = os.path.join(checkpoint_dir, checkpoint_files[0])
     model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
@@ -187,13 +201,25 @@ def main():
     if torch.cuda.is_available():
         model = model.cuda()
     
-    # Align videos
-    align_videos(
-        video1_path='../videos_160/0.mp4',
-        video2_path='../videos_160/2.mp4',
-        model=model,
-        output_path='aligned_videos.mp4'
-    )
+    video_names = ['0.mp4', '2.mp4', '4.mp4', '6.mp4', '8.mp4', '10.mp4']
+
+    # Create a folder for aligned videos
+    aligned_videos_folder = 'aligned_videos'
+    if not os.path.exists(aligned_videos_folder):
+        os.makedirs(aligned_videos_folder)
+
+    # Perform alignment for all pairs of videos
+    for i in range(len(video_names)):
+        for j in range(i + 1, len(video_names)):
+            video1_path = f'../videos_160/{video_names[i]}'
+            video2_path = f'../videos_160/{video_names[j]}'
+            output_path = f'{aligned_videos_folder}/{video_names[i]}_{video_names[j]}.mp4'
+            align_videos(
+                video1_path=video1_path,
+                video2_path=video2_path,
+                model=model,
+                output_path=output_path
+            )
 
 
 if __name__ == '__main__':
