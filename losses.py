@@ -15,11 +15,12 @@ def classification_loss(logits, labels, label_smoothing):
 
     return loss
 
-def regression_loss(logits, labels, num_steps, steps, seq_lens, loss_type,
-                    normalize_indices, variance_lambda, huber_delta):
+def regression_loss(logits, labels, alpha, num_steps, steps, seq_lens, steps_j, seq_lens_j,
+                    loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, window_size, use_align_alpha, align_alpha_strength):
     # Detach labels and steps to stop gradients
     labels = labels.detach()
     steps = steps.detach()
+    steps_j = steps_j.detach()
 
     # Normalize indices if required
     if normalize_indices:
@@ -30,11 +31,20 @@ def regression_loss(logits, labels, num_steps, steps, seq_lens, loss_type,
         steps = steps.float()
 
     # Compute softmax over logits to get probabilities (beta)
-    beta = F.softmax(logits, dim=1)       
+    beta = F.softmax(logits, dim=1)       # [N(N-1)*T, T]
 
     # Compute true_time and pred_time, in terms of time sequence, not the sampled steps
-    true_time = torch.sum(steps * labels, dim=1)
-    pred_time = torch.sum(steps * beta, dim=1)       # mu, for every sampled time point in the batch
+    true_time = torch.sum(steps * labels, dim=1)      # [N(N-1)*T]
+    pred_time = torch.sum(steps * beta, dim=1)       # [N(N-1)*T], mu, for every sampled time point in the batch
+
+    # Compute tilda v
+    if use_align_alpha:
+        tilda_v = torch.sum(steps_j * alpha, dim=1)       # [N(N-1)*T], tilda v_i
+        tilda_v_reshape = tilda_v.reshape(-1, alpha.shape[1])       # [N(N-1), T]
+        d_tilda_v = tilda_v_reshape[:, 1:] - tilda_v_reshape[:, :-1]       # [N(N-1), T-1]
+        align_alpha_loss = torch.mean(torch.relu(-d_tilda_v) ** 2) * align_alpha_strength        
+    else:
+        align_alpha_loss = 0.0
 
     if loss_type in ['regression_mse', 'regression_mse_var']:
         if 'var' in loss_type:
@@ -47,15 +57,15 @@ def regression_loss(logits, labels, num_steps, steps, seq_lens, loss_type,
             squared_error = (true_time - pred_time) ** 2
 
             loss = torch.mean(torch.exp(-pred_time_log_var) * squared_error + variance_lambda * pred_time_log_var)
-            return loss
+            return loss + align_alpha_loss
         else:
             # Standard MSE loss, without log variance normalization
             loss = F.mse_loss(pred_time, true_time)
-            return loss
+            return loss + align_alpha_loss
     elif loss_type == 'regression_huber':
         # Huber loss (Smooth L1 loss in PyTorch)
         loss = F.smooth_l1_loss(pred_time, true_time, beta=huber_delta)
-        return loss
+        return loss + align_alpha_loss
     else:
         raise ValueError(f"Unsupported regression loss '{loss_type}'. Supported losses are: "
                          "regression_mse, regression_mse_var, regression_huber.")
@@ -83,7 +93,7 @@ def get_scaled_similarity(embs1, embs2, similarity_type, temperature):
     # Scale by temperature
     similarity = similarity / temperature
 
-    return similarity
+    return similarity       # [N1, N2], every element is the similarity between a pair of embeddings
 
 def align_pair_of_sequences(embs1, embs2, similarity_type, temperature):     # embs1 is U, embs2 is V
     max_num_steps = embs1.shape[0]        # embs1 and embs2 have the same number of steps, N1 = N2
@@ -91,6 +101,7 @@ def align_pair_of_sequences(embs1, embs2, similarity_type, temperature):     # e
     # Compute similarities between embs1 and embs2
     sim_12 = get_scaled_similarity(embs1, embs2, similarity_type, temperature)       # [N1, N2]
     softmaxed_sim_12 = F.softmax(sim_12, dim=1)         # alpha
+    alpha = softmaxed_sim_12         # [N1, N2]
 
     # Compute soft-nearest neighbors
     nn_embs = torch.mm(softmaxed_sim_12, embs2)          # [N1, D], tilda v_i
@@ -101,7 +112,7 @@ def align_pair_of_sequences(embs1, embs2, similarity_type, temperature):     # e
     logits = sim_21
     labels = F.one_hot(torch.arange(max_num_steps), num_classes=max_num_steps).float().to(embs1.device)       # [N1, N1], identity matrix
 
-    return logits, labels       # logits before softmax, labels are one-hot
+    return logits, labels, alpha       # logits before softmax, labels are one-hot
 
 def compute_deterministic_alignment_loss(embs,
                                          steps,
@@ -114,17 +125,25 @@ def compute_deterministic_alignment_loss(embs,
                                          label_smoothing,
                                          variance_lambda,
                                          huber_delta,
-                                         normalize_indices):
+                                         normalize_indices,
+                                         use_random_window,
+                                         window_size,
+                                         use_align_alpha,
+                                         align_alpha_strength):
+    
     labels_list = []
     logits_list = []
-    steps_list = []
-    seq_lens_list = []
+    steps_list = []        # steps of u
+    seq_lens_list = []       # sequence lengths of u
+    steps_j_list = []       # steps of v
+    seq_lens_j_list = []       # sequence lengths of v
+    alpha_list = []
 
     for i in range(batch_size):
         for j in range(batch_size):
             # Do not align the sequence with itself
             if i != j:
-                logits, labels = align_pair_of_sequences(
+                logits, labels, alpha = align_pair_of_sequences(          # logits is beta before softmax
                     embs[i],
                     embs[j],
                     similarity_type,
@@ -132,22 +151,30 @@ def compute_deterministic_alignment_loss(embs,
                 )
                 logits_list.append(logits)       # [T, T]
                 labels_list.append(labels)       # [T, T]
+                alpha_list.append(alpha)        # [T, T]
                 steps_i = steps[i].unsqueeze(0).repeat(num_steps, 1)        # [T, T], every row is the same, representing the step indices of ui
                 steps_list.append(steps_i)
                 seq_lens_i = seq_lens[i].unsqueeze(0).repeat(num_steps)        # [T], every element is the same, representing the sequence length of ui
                 seq_lens_list.append(seq_lens_i)
+                steps_j = steps[j].unsqueeze(0).repeat(num_steps, 1)        # [T, T], every row is the same, representing the step indices of vj
+                steps_j_list.append(steps_j)
+                seq_lens_j = seq_lens[j].unsqueeze(0).repeat(num_steps)        # [T], every element is the same, representing the sequence length of vj
+                seq_lens_j_list.append(seq_lens_j)
 
-    logits = torch.cat(logits_list, dim=0)          # [N(N-1)*T, T]
+    logits = torch.cat(logits_list, dim=0)          # [N(N-1)*T, T], N is the batch size
     labels = torch.cat(labels_list, dim=0)          # [N(N-1)*T, T]
+    alpha = torch.cat(alpha_list, dim=0)          # [N(N-1)*T, T]
     steps = torch.cat(steps_list, dim=0)           # [N(N-1)*T, T]
     seq_lens = torch.cat(seq_lens_list, dim=0)      # [N(N-1)*T]
+    steps_j = torch.cat(steps_j_list, dim=0)           # [N(N-1)*T, T]
+    seq_lens_j = torch.cat(seq_lens_j_list, dim=0)      # [N(N-1)*T]
 
     if loss_type == 'classification':
         loss = classification_loss(logits, labels, label_smoothing)
     elif 'regression' in loss_type:
         loss = regression_loss(
-            logits, labels, num_steps, steps, seq_lens,
-            loss_type, normalize_indices, variance_lambda, huber_delta
+            logits, labels, alpha, num_steps, steps, seq_lens, steps_j, seq_lens_j,
+            loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, window_size, use_align_alpha, align_alpha_strength
         )
     else:
         raise ValueError(f"Unidentified loss_type {loss_type}. Currently supported loss "
@@ -245,7 +272,9 @@ def compute_stochastic_alignment_loss(embs,
                                       label_smoothing,
                                       variance_lambda,
                                       huber_delta,
-                                      normalize_indices):
+                                      normalize_indices,
+                                      use_random_window,
+                                      use_align_alpha):
     device = embs.device
 
     # Generate cycles.
@@ -269,7 +298,7 @@ def compute_stochastic_alignment_loss(embs,
         seq_lens_selected = seq_lens[cycles[:, 0]]       # [num_cycles], sequence lengths of u in each cycle
         loss = regression_loss(
             logits, labels, num_steps, steps_selected, seq_lens_selected,
-            loss_type, normalize_indices, variance_lambda, huber_delta
+            loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, use_align_alpha
         )
     else:
         raise ValueError(f"Unidentified loss type {loss_type}. Currently supported loss "
@@ -291,7 +320,11 @@ def compute_alignment_loss(embs,          # [B, T, D]
                            label_smoothing=0.1,
                            variance_lambda=0.001,
                            huber_delta=0.1,        
-                           normalize_indices=True):
+                           normalize_indices=True,
+                           use_random_window=False,
+                           window_size=5,
+                           use_align_alpha=False,
+                           align_alpha_strength=0.1):
     
     ##############################################################################
     # Checking inputs and setting defaults.
@@ -336,7 +369,11 @@ def compute_alignment_loss(embs,          # [B, T, D]
             label_smoothing=label_smoothing,
             variance_lambda=variance_lambda,
             huber_delta=huber_delta,
-            normalize_indices=normalize_indices)
+            normalize_indices=normalize_indices,
+            use_random_window=use_random_window,
+            window_size=window_size,
+            use_align_alpha=use_align_alpha,
+            align_alpha_strength=align_alpha_strength)
     else:
         loss = compute_deterministic_alignment_loss(          # compute loss between all pairs of sequences
             embs=embs,
@@ -350,6 +387,10 @@ def compute_alignment_loss(embs,          # [B, T, D]
             label_smoothing=label_smoothing,
             variance_lambda=variance_lambda,
             huber_delta=huber_delta,
-            normalize_indices=normalize_indices)
+            normalize_indices=normalize_indices,
+            use_random_window=use_random_window,
+            window_size=window_size,
+            use_align_alpha=use_align_alpha,
+            align_alpha_strength=align_alpha_strength)
 
     return loss

@@ -94,11 +94,12 @@ class BaseModel(nn.Module):
         return features
     
 class ModelWrapper(nn.Module):
-    def __init__(self):
+    def __init__(self, do_not_reduce_frame_rate=False):
         super(ModelWrapper, self).__init__()
 
         self.cnn = BaseModel()
         self.emb = ConvEmbedder()
+        self.do_not_reduce_frame_rate = do_not_reduce_frame_rate
 
     def forward(self, data):
         
@@ -108,9 +109,17 @@ class ModelWrapper(nn.Module):
         # stack features
         context_frames = 3
         batch_size, num_frames, channels, feature_h, feature_w = cnn_feats.shape
-        num_context = num_frames // context_frames
-        cnn_feats = cnn_feats[:, :num_context*context_frames, :, :, :]
-        cnn_feats = cnn_feats.reshape(batch_size * num_context, context_frames, channels, feature_h, feature_w)
+        if self.do_not_reduce_frame_rate:
+            cnn_feats_temp = torch.zeros(batch_size, num_frames, context_frames, channels, feature_h, feature_w)
+            pad = context_frames // 2
+            padded_cnn_feats = F.pad(cnn_feats, (0, 0, 0, 0, 0, 0, pad, pad))
+            cnn_feats_temp = torch.cat([padded_cnn_feats[:, i:i + num_frames] for i in range(context_frames)], dim=2)
+            cnn_feats_temp = cnn_feats_temp.permute(0, 2, 1, 3, 4, 5)
+            cnn_feats = cnn_feats_temp.view(batch_size * num_frames, context_frames, channels, feature_h, feature_w)
+        else:
+            num_context = num_frames // context_frames
+            cnn_feats = cnn_feats[:, :num_context*context_frames, :, :, :]
+            cnn_feats = cnn_feats.reshape(batch_size * num_context, context_frames, channels, feature_h, feature_w)
 
         # Pass CNN features through Embedder
         embs = self.emb(cnn_feats)

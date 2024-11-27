@@ -11,9 +11,12 @@ from losses import compute_alignment_loss
 from util import video_to_frames
 from pathlib import Path
 from torch.nn.utils.rnn import pad_sequence
+import argparse
+from tensorboard.backend.event_processing import event_accumulator
+import matplotlib.pyplot as plt
 
  # Create datasets
-class VideoDataset(Dataset):
+class VideoDataset(Dataset):        # all the videos are trimmed to the shortest video length
     def __init__(self, video_files):
         print(f"Initializing VideoDataset with {len(video_files)} videos...")
         self.video_files = video_files
@@ -66,15 +69,22 @@ def collate_fn(batch):
     return padded_batch
 
 class LitModel(pl.LightningModule):
-    def __init__(self, model=None):
+    def __init__(self, model=None, loss_type='regression_mse_var', similarity_type='l2', temperature=0.1, variance_lambda=0.001, use_random_window=False, use_align_alpha=False, align_alpha_strength=0.1, do_not_reduce_frame_rate=False):
         super().__init__()
         print("Initializing LitModel...")
-        self.model = model if model else ModelWrapper()
+        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate)
+        self.loss_type = loss_type
+        self.similarity_type = similarity_type
+        self.temperature = temperature
+        self.variance_lambda = variance_lambda
+        self.use_random_window = use_random_window
+        self.use_align_alpha = use_align_alpha
+        self.align_alpha_strength = align_alpha_strength
                 
     def training_step(self, batch, batch_idx):
         x = batch
         y_hat = self(x)
-        loss = compute_alignment_loss(y_hat, batch_size=x.shape[0])
+        loss = compute_alignment_loss(y_hat, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
         self.log('train_loss', loss)
         return loss
         
@@ -82,7 +92,7 @@ class LitModel(pl.LightningModule):
         x = batch
         with torch.no_grad():
             y_hat = self(x)
-        loss = compute_alignment_loss(y_hat, batch_size=x.shape[0])
+        loss = compute_alignment_loss(y_hat, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
         self.log('val_loss', loss)
         return loss
         
@@ -99,12 +109,12 @@ class LitModel(pl.LightningModule):
         embs = self.model(frames)
         return embs
 
-def train():
+def train(args):
     print("Starting training process...")
     print("Loading video files...")
-    video_dir = Path('../videos_160')
+    video_dir = Path('../data/GolfDB')
     video_files = list(video_dir.glob('*.mp4'))
-    video_files = [file for file in video_files if int(str(file).split('/')[-1].split('.')[0]) % 2 == 0]
+    video_files = [file for file in video_files if int(str(file).split('/')[-1].split('.')[0]) % 2 == (0 if not args.use_120fps else 1)]
     video_files.sort(key=lambda x : int(str(x).split('/')[-1].split('.')[0]))
     video_files = video_files[:10]
     print(video_files)
@@ -138,10 +148,12 @@ def train():
     model = LitModel()
     
     print("Setting up training callbacks and logger...")
+    filename = 'model-{epoch:02d}-{val_loss:.2f}'
+    filename += f"{args.loss_type}_{args.similarity_type}_temp_{args.temperature}_var_{args.variance_lambda}_random_window_{args.use_random_window}_align_alpha_{args.use_align_alpha}_align_alpha_strength_{args.align_alpha_strength}_do_not_reduce_frame_rate_{args.do_not_reduce_frame_rate}"
     checkpoint_callback = ModelCheckpoint(
         monitor='val_loss',
         dirpath='checkpoints',
-        filename='model-{epoch:02d}-{val_loss:.2f}',
+        filename=filename,
         save_top_k=3,
         mode='min',
     )
@@ -160,6 +172,46 @@ def train():
     trainer.fit(model, train_loader, train_loader)
     print("Training complete!")
 
+def plot_loss(log_dir):
+    print("Plotting loss...")
+
+    ea = event_accumulator.EventAccumulator(log_dir)
+    ea.Reload()
+
+    train_loss = ea.Scalars('train_loss')
+    val_loss = ea.Scalars('val_loss')
+
+    train_steps = [x.step for x in train_loss]
+    train_values = [x.value for x in train_loss]
+
+    val_steps = [x.step for x in val_loss]
+    val_values = [x.value for x in val_loss]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_steps, train_values, label='Train Loss')
+    plt.plot(val_steps, val_values, label='Validation Loss')
+    plt.xlabel('Steps')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.show()
+
 if __name__ == "__main__":
+    def parse_args():
+        parser = argparse.ArgumentParser(description="Train a video alignment model.")
+        parser.add_argument('--loss_type', type=str, default='regression_mse_var', help='Type of loss function to use')
+        parser.add_argument('--similarity_type', type=str, default='l2', help='Type of similarity function to use')
+        parser.add_argument('--temperature', type=float, default=0.1, help='Temperature parameter for contrastive loss')
+        parser.add_argument('--variance_lambda', type=float, default=0.001, help='Lambda parameter for variance loss')
+        parser.add_argument('--use_random_window', action='store_true', help='Whether to use random window cropping')
+        parser.add_argument('--use_align_alpha', action='store_true', help='Whether to use alignment alpha')
+        parser.add_argument('--align_alpha_strength', type=float, default=0.1, help='Strength of alignment alpha')
+        parser.add_argument('--do_not_reduce_frame_rate', action='store_true', help='Whether to reduce frame rate to 10fps')
+        parser.add_argument('--use_120fps', action='store_true', help='Whether to use 120fps videos')
+        return parser.parse_args()
+
+    args = parse_args()
     print("Script started...")
-    train()
+    train(args)
+    print("Script complete!")
+    plot_loss('lightning_logs/my_model')
