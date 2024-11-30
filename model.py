@@ -116,10 +116,12 @@ class ModelWrapper(nn.Module):
         embs = self.emb(cnn_feats)
 
         # Reshape to (batch_size, num_frames, embedding_dim)
-        channels = embs.shape[-1]
-        embs = embs.view(batch_size, num_context, channels)
+        emb_channels = embs.shape[-1]
+        embs = embs.view(batch_size, num_context, emb_channels)
+
+        cnn_feats = cnn_feats.reshape(batch_size, num_context, context_frames * channels * feature_h * feature_w)
         
-        return embs
+        return embs, cnn_feats
     
     def load_state_dict(self, state_dict):
         # Convert keys from 'cnn.' prefix to 'cnn' dict

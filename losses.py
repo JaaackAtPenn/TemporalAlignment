@@ -2,20 +2,36 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def classification_loss(logits, labels, label_smoothing):
+def classification_loss(logits, labels, cnn_features_similarities, label_smoothing):
+    # Normalize cnn_features_similarities to 0 to 1
+    cnn_features_similarities = (cnn_features_similarities - cnn_features_similarities.min(dim=1)[0].unsqueeze(1)) / (cnn_features_similarities.max(dim=1)[0].unsqueeze(1) - cnn_features_similarities.min(dim=1)[0].unsqueeze(1))
     # Detach labels to stop gradients, as we are generating labels
     labels = labels.detach()
-
     # Convert one-hot labels to class indices
-    targets = torch.argmax(labels, dim=1)
+    # targets = torch.argmax(labels, dim=1)
+    targets = labels + cnn_features_similarities
 
     # Use CrossEntropyLoss with label smoothing
     loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     loss = loss_fn(logits, targets)
 
+    # TODO: down weight
+    # TODO: Fix loss is empty
+
+    # import matplotlib.pyplot as plt
+    # import seaborn as sns
+
+    #  # Make a heat map of dist
+    # plt.figure(figsize=(10, 10))
+    # sns.heatmap(cnn_features_similarities.detach().cpu()[:cnn_features_similarities.shape[0]//2], cmap='coolwarm')
+    # plt.title('Similarity Heatmap')
+    # plt.savefig('temp_sim_full.png')
+
+    # breakpoint()
+
     return loss
 
-def regression_loss(logits, labels, num_steps, steps, seq_lens, loss_type,
+def regression_loss(logits, labels, cnn_features_similarities, num_steps, steps, seq_lens, loss_type,
                     normalize_indices, variance_lambda, huber_delta):
     # Detach labels and steps to stop gradients
     labels = labels.detach()
@@ -45,6 +61,7 @@ def regression_loss(logits, labels, num_steps, steps, seq_lens, loss_type,
             # Use log of variance for numerical stability
             pred_time_log_var = torch.log(pred_time_variance + 1e-8)  # Add epsilon to avoid log(0), not in the original TCC code
             squared_error = (true_time - pred_time) ** 2
+            breakpoint()
 
             loss = torch.mean(torch.exp(-pred_time_log_var) * squared_error + variance_lambda * pred_time_log_var)
             return loss
@@ -100,10 +117,10 @@ def align_pair_of_sequences(embs1, embs2, similarity_type, temperature):     # e
 
     logits = sim_21
     labels = F.one_hot(torch.arange(max_num_steps), num_classes=max_num_steps).float().to(embs1.device)       # [N1, N1], identity matrix
-
     return logits, labels       # logits before softmax, labels are one-hot
 
 def compute_deterministic_alignment_loss(embs,
+                                         cnn_features,
                                          steps,
                                          seq_lens,
                                          num_steps,
@@ -119,6 +136,7 @@ def compute_deterministic_alignment_loss(embs,
     logits_list = []
     steps_list = []
     seq_lens_list = []
+    cnn_sim_list = []
 
     for i in range(batch_size):
         for j in range(batch_size):
@@ -136,17 +154,25 @@ def compute_deterministic_alignment_loss(embs,
                 steps_list.append(steps_i)
                 seq_lens_i = seq_lens[i].unsqueeze(0).repeat(num_steps)        # [T], every element is the same, representing the sequence length of ui
                 seq_lens_list.append(seq_lens_i)
+                cnn_sim_list.append(get_scaled_similarity(
+                        cnn_features[i],
+                        cnn_features[i],
+                        similarity_type,
+                        temperature
+                    )
+                )
 
     logits = torch.cat(logits_list, dim=0)          # [N(N-1)*T, T]
     labels = torch.cat(labels_list, dim=0)          # [N(N-1)*T, T]
-    steps = torch.cat(steps_list, dim=0)           # [N(N-1)*T, T]
+    steps = torch.cat(steps_list, dim=0)            # [N(N-1)*T, T]
     seq_lens = torch.cat(seq_lens_list, dim=0)      # [N(N-1)*T]
+    cnn_sim_list = torch.cat(cnn_sim_list, dim=0)   # [N*T]
 
     if loss_type == 'classification':
-        loss = classification_loss(logits, labels, label_smoothing)
+        loss = classification_loss(logits, labels, cnn_sim_list, label_smoothing)
     elif 'regression' in loss_type:
         loss = regression_loss(
-            logits, labels, num_steps, steps, seq_lens,
+            logits, labels, cnn_sim_list, num_steps, steps, seq_lens,
             loss_type, normalize_indices, variance_lambda, huber_delta
         )
     else:
@@ -233,6 +259,7 @@ def gen_cycles(num_cycles, batch_size, cycle_length=2):        # if cycle_length
     return cycles
 
 def compute_stochastic_alignment_loss(embs,
+                                      cnn_features,
                                       steps,
                                       seq_lens,
                                       num_steps,
@@ -278,6 +305,7 @@ def compute_stochastic_alignment_loss(embs,
     return loss
 
 def compute_alignment_loss(embs,          # [B, T, D]
+                           cnn_features,
                            batch_size,          
                            steps=None,         # [B, T], because of sampling, steps are not necessarily consecutive
                            seq_lens=None,         # sequence lengths are not necessarily equal before sampling
@@ -324,6 +352,7 @@ def compute_alignment_loss(embs,          # [B, T, D]
     if stochastic_matching:
         loss = compute_stochastic_alignment_loss(
             embs=embs,
+            cnn_features=cnn_features,
             steps=steps,
             seq_lens=seq_lens,
             num_steps=num_steps,
@@ -340,6 +369,7 @@ def compute_alignment_loss(embs,          # [B, T, D]
     else:
         loss = compute_deterministic_alignment_loss(          # compute loss between all pairs of sequences
             embs=embs,
+            cnn_features=cnn_features,
             steps=steps,
             seq_lens=seq_lens,
             num_steps=num_steps,

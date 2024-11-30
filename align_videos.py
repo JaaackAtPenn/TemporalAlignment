@@ -57,7 +57,7 @@ def extract_features(frames: np.ndarray, model: ModelWrapper) -> torch.Tensor:
         
     # Extract features
     with torch.no_grad():
-        features = model(frames)  # [1,T//3,embedding_dim]
+        features, cnn = model(frames)  # [1,T//3,embedding_dim]
         
     # Remove batch dimension
     features = features.squeeze(0)  # [T//3,embedding_dim]
@@ -148,6 +148,14 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
     # Compute similarities between embs1 and embs2
     dist = get_scaled_similarity(features1, features2, 'l2', 0.1)       # [N1, N2]
 
+    softmaxed_sim_12 = torch.nn.functional.softmax(dist, dim=1)         # alpha
+
+    # Compute soft-nearest neighbors
+    nn_embs = torch.mm(softmaxed_sim_12, features2)          # [N1, D], tilda v_i
+
+    # Compute similarities between nn_embs and embs1
+    sim_21 = get_scaled_similarity(nn_embs, features1, 'l2', 0.1)        # [N1, N1], beta before softmax
+
     # Find the minimum cost assignment using dynamic time warping
     dtw_result = dtw(features1, features2, dist_method='euclidean')
 
@@ -155,7 +163,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
 
     # Make a heat map of dist
     plt.figure(figsize=(10, 10))
-    sns.heatmap(-dist, cmap='coolwarm')
+    sns.heatmap(sim_21, cmap='coolwarm')
     plt.title('Similarity Heatmap')
     plt.savefig(output_path + '.png')
     

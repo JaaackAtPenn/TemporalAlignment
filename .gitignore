@@ -7,3 +7,4 @@ __pycache__
 *.pyo
 *.pyd
 .DS_Store
+aligned_videos/
