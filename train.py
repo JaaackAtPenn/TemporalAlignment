@@ -7,6 +7,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader, Dataset
 from model import ModelWrapper
+from torchvision import transforms
 from losses import compute_alignment_loss
 from util import video_to_frames
 from pathlib import Path
@@ -14,6 +15,9 @@ from torch.nn.utils.rnn import pad_sequence
 import argparse
 from tensorboard.backend.event_processing import event_accumulator
 import matplotlib.pyplot as plt
+import glob
+import os
+from PIL import Image
 
  # Create datasets
 class VideoDataset(Dataset):        # all the videos are trimmed to the shortest video length
@@ -54,6 +58,10 @@ class VideoDataset(Dataset):        # all the videos are trimmed to the shortest
 def collate_fn(batch):
     # Pad sequences to the same length
     # Each item in batch is [T,C,H,W]
+    print("Batch shapes:")
+    for item in batch:
+        print(item.shape)
+    
     sequences = [item for item in batch]
     
     # Get max sequence length in this batch
@@ -68,6 +76,62 @@ def collate_fn(batch):
 
     return padded_batch
 
+class FrameSequenceDataset(Dataset):
+    def __init__(self, root_dir, resize=(224, 224)):
+        """
+        Args:
+            root_dir (str): Path to the root directory containing video folders.
+            resize (tuple): Resize each frame to this size (height, width).
+        """
+        print(f"Initializing dataset from {root_dir}...")
+        self.root_dir = root_dir
+        self.resize = resize
+        self.sequences = []  # Stores a list of sequences (each sequence is a list of image paths)
+
+        # Load sequences
+        for sequence_folder in sorted(os.listdir(root_dir)):
+            sequence_path = os.path.join(root_dir, sequence_folder)
+            if os.path.isdir(sequence_path):
+                # Get all image files in this sequence, sorted by name
+                frame_files = sorted(glob.glob(os.path.join(sequence_path, "*.jpg")))
+                if frame_files:
+                    self.sequences.append(frame_files)
+        
+        # Ensure there's at least one sequence
+        if not self.sequences:
+            raise ValueError(f"No valid sequences found in {root_dir}")
+
+        # Find the shortest sequence length
+        self.shortest_sequence_length = min(len(seq) for seq in self.sequences)
+        print(f"Dataset initialized with {len(self.sequences)} sequences. Shortest sequence length: {self.shortest_sequence_length}")
+
+        # Define image transformations
+        self.transform = transforms.Compose([
+            transforms.Resize(resize),
+            transforms.ToTensor(),  # Converts to [C, H, W] and normalizes to [0, 1]
+        ])
+
+    def __len__(self):
+        return len(self.sequences)
+
+    def __getitem__(self, idx):
+        """
+        Returns:
+            frames: Tensor of shape [T, C, H, W], where T is the number of frames.
+        """
+        sequence = self.sequences[idx]
+
+        # Load and preprocess frames (trim to the shortest sequence length)
+        frames = []
+        for img_path in sequence[:self.shortest_sequence_length]:
+            img = Image.open(img_path).convert("RGB")  # Ensure RGB format
+            img = self.transform(img)
+            frames.append(img)
+
+        # Stack frames into a single tensor of shape [T, C, H, W]
+        frames = torch.stack(frames)
+        return frames
+    
 class LitModel(pl.LightningModule):
     def __init__(self, model=None, loss_type='regression_mse_var', similarity_type='l2', temperature=0.1, variance_lambda=0.001, use_random_window=False, use_align_alpha=False, align_alpha_strength=0.1, do_not_reduce_frame_rate=False):
         super().__init__()
@@ -109,11 +173,18 @@ class LitModel(pl.LightningModule):
         embs = self.model(frames)
         return embs
 
-def train(args):
+def DBgolf():
     print("Starting training process...")
     print("Loading video files...")
-    video_dir = Path('../data/GolfDB')
-    video_files = list(video_dir.glob('*.mp4'))
+    video_dir = Path('./data/GolfDB')
+    if video_dir.exists() and video_dir.is_dir():
+        video_files = list(video_dir.glob('*.mp4')) + list(video_dir.glob('*.MP4'))
+        if not video_files:
+            print("No video files found with .mp4 extension.")
+        else:
+            print(f"Found {len(video_files)} video files.")
+    else:
+        print("Directory does not exist or is not a valid directory.")
     video_files = [file for file in video_files if int(str(file).split('/')[-1].split('.')[0]) % 2 == (0 if not args.use_120fps else 1)]
     video_files.sort(key=lambda x : int(str(x).split('/')[-1].split('.')[0]))
     video_files = video_files[:10]
@@ -131,16 +202,51 @@ def train(args):
     train_dataset = VideoDataset(train_files)
     print("Creating validation dataset...")
     val_dataset = VideoDataset(val_files)
+    return train_dataset, val_dataset
+
+def PennAction():
+    print("Starting training process...")
+    print("Loading video files...")
+    frame_dir = Path('./data/Penn_Action/Penn_Action/frames')
+    
+    if frame_dir.exists() and frame_dir.is_dir():
+        # Initialize the dataset
+        dataset = FrameSequenceDataset(frame_dir)
+
+        # Check dataset info
+        print(f"Total sequences in dataset: {len(dataset)}")
+        print(f"Shortest sequence length: {dataset.shortest_sequence_length}")
+
+        # Reduce the dataset to the first 10 sequences
+        max_sequences = 4
+        dataset = torch.utils.data.Subset(dataset, range(min(max_sequences, len(dataset))))
+        print(f"Reduced dataset size: {len(dataset)}")
+
+        # Split dataset into train and validation sets
+        dataset_size = len(dataset)
+        train_size = int(0.8 * dataset_size)
+        val_size = dataset_size - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+        
+        print(f"Dataset split: {train_size} training sequences, {val_size} validation sequences.")
+        return train_dataset, val_dataset
+    else:
+        print("Directory does not exist or is not a valid directory.")
+        return None, None
+    
+def train(args):
+    # train_dataset, val_dataset = DBgolf()
+    train_dataset, val_dataset = PennAction()
     
     print("Creating data loaders...")
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=8, 
+        batch_size=2, 
         collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=16, 
+        batch_size=2, 
         collate_fn=collate_fn
     )
     
@@ -214,4 +320,4 @@ if __name__ == "__main__":
     print("Script started...")
     train(args)
     print("Script complete!")
-    plot_loss('lightning_logs/my_model')
+    # plot_loss('lightning_logs/my_model')
