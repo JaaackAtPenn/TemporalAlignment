@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import glob
 import os
 from PIL import Image
+import random
 
  # Create datasets
 class VideoDataset(Dataset):        # all the videos are trimmed to the shortest video length
@@ -58,9 +59,9 @@ class VideoDataset(Dataset):        # all the videos are trimmed to the shortest
 def collate_fn(batch):
     # Pad sequences to the same length
     # Each item in batch is [T,C,H,W]
-    print("Batch shapes:")
-    for item in batch:
-        print(item.shape)
+    # print("Batch shapes:")
+    # for item in batch:
+    #     print(item.shape)
     
     sequences = [item for item in batch]
     
@@ -86,29 +87,24 @@ class FrameSequenceDataset(Dataset):
         print(f"Initializing dataset from {root_dir}...")
         self.root_dir = root_dir
         self.resize = resize
-        self.sequences = []  # Stores a list of sequences (each sequence is a list of image paths)
+        self.sequences = []  # each item is a list of image paths
 
-        # Load sequences
-        for sequence_folder in sorted(os.listdir(root_dir)):
+        # get golf folders
+        self.sequences_folder = self._filter_folders()
+        # get all image files in this sequence, sorted by name
+        for sequence_folder in self.sequences_folder:
             sequence_path = os.path.join(root_dir, sequence_folder)
             if os.path.isdir(sequence_path):
-                # Get all image files in this sequence, sorted by name
                 frame_files = sorted(glob.glob(os.path.join(sequence_path, "*.jpg")))
                 if frame_files:
                     self.sequences.append(frame_files)
         
-        # Ensure there's at least one sequence
-        if not self.sequences:
-            raise ValueError(f"No valid sequences found in {root_dir}")
-
-        # Find the shortest sequence length
         self.shortest_sequence_length = min(len(seq) for seq in self.sequences)
-        print(f"Dataset initialized with {len(self.sequences)} sequences. Shortest sequence length: {self.shortest_sequence_length}")
+        print(f"Shortest sequence length: {self.shortest_sequence_length}")
 
-        # Define image transformations
         self.transform = transforms.Compose([
             transforms.Resize(resize),
-            transforms.ToTensor(),  # Converts to [C, H, W] and normalizes to [0, 1]
+            transforms.ToTensor(),  
         ])
 
     def __len__(self):
@@ -121,16 +117,29 @@ class FrameSequenceDataset(Dataset):
         """
         sequence = self.sequences[idx]
 
-        # Load and preprocess frames (trim to the shortest sequence length)
+        if len(sequence) > self.shortest_sequence_length:
+            sampled_indices = sorted(random.sample(range(len(sequence)), self.shortest_sequence_length))
+            sampled_sequence = [sequence[i] for i in sampled_indices]
+        else:
+            sampled_sequence = sequence
+
         frames = []
-        for img_path in sequence[:self.shortest_sequence_length]:
-            img = Image.open(img_path).convert("RGB")  # Ensure RGB format
+        for img_path in sampled_sequence[:self.shortest_sequence_length]:
+            img = Image.open(img_path).convert("RGB")
             img = self.transform(img)
             frames.append(img)
 
-        # Stack frames into a single tensor of shape [T, C, H, W]
         frames = torch.stack(frames)
         return frames
+    
+    def _filter_folders(self):
+        folders = [folder for folder in self.root_dir.iterdir() if folder.is_dir()]
+        filtered_folders = [
+            folder.resolve() for folder in folders
+            # Glof video indices: 0789 - 0954
+            if 789 <= int(folder.name) <= 954
+        ]
+        return sorted(filtered_folders, key=lambda x: int(x.name))
     
 class LitModel(pl.LightningModule):
     def __init__(self, model=None, loss_type='regression_mse_var', similarity_type='l2', temperature=0.1, variance_lambda=0.001, use_random_window=False, use_align_alpha=False, align_alpha_strength=0.1, do_not_reduce_frame_rate=False):
@@ -210,10 +219,8 @@ def PennAction():
     frame_dir = Path('./data/Penn_Action/Penn_Action/frames')
     
     if frame_dir.exists() and frame_dir.is_dir():
-        # Initialize the dataset
         dataset = FrameSequenceDataset(frame_dir)
 
-        # Check dataset info
         print(f"Total sequences in dataset: {len(dataset)}")
         print(f"Shortest sequence length: {dataset.shortest_sequence_length}")
 
@@ -235,19 +242,26 @@ def PennAction():
         return None, None
     
 def train(args):
-    # train_dataset, val_dataset = DBgolf()
-    train_dataset, val_dataset = PennAction()
-    
+    print(f"Using dataset: {args.dataset}")
+    if args.dataset == 'GolfDB':
+        train_dataset, val_dataset = DBgolf()
+    elif args.dataset == 'PennAction':
+        train_dataset, val_dataset = PennAction()
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+        
     print("Creating data loaders...")
     train_loader = DataLoader(
         train_dataset, 
         batch_size=2, 
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        drop_last=True 
     )
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=2, 
-        collate_fn=collate_fn
+        batch_size=4, 
+        collate_fn=collate_fn,
+        drop_last=True 
     )
     
     print("Initializing model...")
@@ -314,6 +328,7 @@ if __name__ == "__main__":
         parser.add_argument('--align_alpha_strength', type=float, default=0.1, help='Strength of alignment alpha')
         parser.add_argument('--do_not_reduce_frame_rate', action='store_true', help='Whether to reduce frame rate to 10fps')
         parser.add_argument('--use_120fps', action='store_true', help='Whether to use 120fps videos')
+        parser.add_argument('--dataset', type=str, default='PennAction', choices=['GolfDB', 'PennAction'], help='Dataset to use for training')
         return parser.parse_args()
 
     args = parse_args()

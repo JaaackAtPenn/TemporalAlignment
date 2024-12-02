@@ -139,6 +139,7 @@ def compute_deterministic_alignment_loss(embs,
     seq_lens_j_list = []       # sequence lengths of v
     alpha_list = []
 
+
     for i in range(batch_size):
         for j in range(batch_size):
             # Do not align the sequence with itself
