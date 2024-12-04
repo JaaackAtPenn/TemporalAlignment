@@ -4,9 +4,12 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Union
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from model import ModelWrapper
 from losses import get_scaled_similarity
+from train import PennAction, collate_fn
+from torch.utils.data import DataLoader
 
 from typing import List, Tuple
 
@@ -25,6 +28,8 @@ def load_video(video_path: str) -> Tuple[np.ndarray, int, int]:
         ret, frame = cap.read()
         if not ret:
             break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.resize(frame, (224, 224))
         frames.append(frame)
     cap.release()
     
@@ -56,6 +61,7 @@ def extract_features(frames: np.ndarray, model: ModelWrapper) -> torch.Tensor:
         
     # Extract features
     with torch.no_grad():
+        print('frame shape:', frames.shape)
         features = model(frames)  # [1,T//3,embedding_dim] or [1,T,embedding_dim] if using downsampling is False
         
     # Remove batch dimension
@@ -94,8 +100,14 @@ def create_side_by_side_frame(frame1: np.ndarray, frame2: np.ndarray, frame1_ind
     text_y2 = 20
     
     # Add text to frames
+    # print(f"Frame1 shape: {frame1.shape}, dtype: {frame1.dtype}")
+    # print("frame1 max and min:", frame1.max(), frame1.min())
     cv2.putText(frame1, label1, (text_x1, text_y1), font, font_scale, color, thickness)
     cv2.putText(frame2, label2, (text_x2, text_y2), font, font_scale, color, thickness)
+    # Plot frame1
+    # plt.imshow(frame1)
+    # plt.title('Frame 1')
+    # plt.show()
 
     return np.hstack((frame1, frame2))
 
@@ -144,6 +156,7 @@ def save_video(frames: List[np.ndarray], output_path: str, fps: int, frame_size:
         frame_size
     )
     for frame in frames:
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         out.write(frame)
     out.release()
 
@@ -160,7 +173,7 @@ def display_frames(frames: List[np.ndarray], fps: int):
             break
     cv2.destroyAllWindows()
 
-def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: torch.Tensor, use_desampling) -> Tuple[np.ndarray, np.ndarray]:
+def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: torch.Tensor, downsample) -> Tuple[np.ndarray, np.ndarray]:
     """Get aligned frames using computed indices.
     
     Args:
@@ -172,7 +185,7 @@ def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: t
         Tuple of (reference frames, aligned frames)
     """    
     # Extract the logits from the alignment tuple
-    if use_desampling:
+    if downsample:
         aligned_frames2 = frames2[aligned_idxs.numpy() * 3] # Multiply by 3 since features are extracted every 3 frames
         aligned_frames1 = frames1[::3]  # Take every 3rd frame to match feature extraction
     else:
@@ -182,7 +195,7 @@ def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: t
     # Make sure frames match in count
     return aligned_frames1, aligned_frames2
 
-def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, use_desampling: bool = True):
+def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False):
     """Align two videos using extracted features and save aligned result.
     
     Args:
@@ -192,47 +205,148 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
         output_path: Path to save aligned video
     """
     # Load videos
-    frames1, fps1, _ = load_video(video1_path)
-    frames2, fps2, _ = load_video(video2_path)
+    if dataset == 'PennAction':
+        train_dataset, val_dataset = PennAction(data_size=10000000, dont_split=False)
+        print('Dataset loaded')
+        print('Number of frames of each video:', len(train_dataset[0][0]))
+        print('Number of videos in train dataset:', len(train_dataset))
+        print('Number of videos in val dataset:', len(val_dataset))
+        trainloader = DataLoader(
+            train_dataset, 
+            batch_size=2, 
+            collate_fn=collate_fn,
+            drop_last=True,
+            shuffle=False)
+        valloader = DataLoader(
+            val_dataset,
+            batch_size=2,
+            collate_fn=collate_fn,
+            drop_last=True,
+            shuffle=False)
+        i = 789
+        if valonval:
+            i += len(train_dataset)
+        end = i + 10
+        if valonval:
+            loader = valloader
+        else:
+            loader = trainloader
+        for batch in loader:
+            frames, steps, seq_lens = batch
+            frames = frames.permute(0, 1, 3, 4, 2).contiguous()
+            frames = frames.detach().cpu().numpy()
+            frames = (frames * 255).astype('uint8')
+            # check if the frames are correct
+            fps = 10 if downsample else 30
+            h, w = frames[0][0].shape[:2]
+            output_path = 'result/frames{}.mp4'.format(i)
+            save_video(
+                frames[0],
+                output_path,
+                fps,  
+                (w, h)   # Double width for side-by-side
+            )
+            output_path = 'result/frames{}.mp4'.format(i+1)
+            save_video(
+                frames[1],
+                output_path,
+                fps,  
+                (w, h)  # Double width for side-by-side
+            )
+            # # Plot the frames to check if they are correct
+            # fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+            # axes[0].imshow(frames[0][0])
+            # axes[0].set_title('First Frame of Video 1')
+            # axes[1].imshow(frames[1][0])
+            # axes[1].set_title('First Frame of Video 2')
+            # fig.savefig('result/frames{}and{}.png'.format(i, i+1))
+            steps1 = steps[0].numpy()
+            # print('steps1:', steps1)
+            steps2 = steps[1].numpy()
+            # print('steps2:', steps2)
+            features1 = extract_features(frames[0], model)
+            features2 = extract_features(frames[1], model)
+            features1 = features1.cpu()
+            features2 = features2.cpu()
+            # print('features1:', features1.shape)
+            # print('features2:', features2.shape)
+            dist = get_scaled_similarity(features1, features2, 'l2', 0.1)
+            matches = dist.argmin(1)
+            # print('matches:', matches)
+            aligned_frames1, aligned_frames2 = get_aligned_frames(frames[0], frames[1], matches, downsample)
+            # print('If downsample:', downsample)
+            if downsample:
+                frame1_indices = steps1[np.arange(1, len(aligned_frames1) * 3, 3)]
+                frame2_indices_cur = steps2[matches.numpy() * 3 + 1]
+            else:
+                frame1_indices = steps1[np.arange(0, len(aligned_frames1))]
+                frame2_indices_cur = steps2[matches.numpy()]
+                # print('frame1_indices:', frame1_indices)
+                # print('frame2_indices_cur:', frame2_indices_cur)
+            frame2_indices_last = np.roll(frame2_indices_cur, 1)
+            combined_frames = [
+                create_side_by_side_frame(f1, f2, f1i, f2ic, f2il) 
+                for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
+            ]
+            output_path = 'result/aligned_videos{}and{}.mp4'.format(i, i+1)
+            # plt.imshow(combined_frames[0])
+            # plt.title('First Frame of Combined Frames')
+            # plt.show()
+            save_video(
+                combined_frames,
+                output_path,
+                fps,  
+                (w*2, h)  # Double width for side-by-side
+            )
+            i += 2
+            if i >= end:
+                break
+    elif dataset == 'GolfDB':
+        frames1, fps1, _ = load_video(video1_path)
+        frames2, fps2, _ = load_video(video2_path)
+        # plt.imshow(frames1[0])
+        # plt.title('First Frame of Video 1')
+        # plt.show()
+        print('frame size:', frames1[0].shape)
     
-    # Extract features
-    features1 = extract_features(frames1, model)         # time dimension is reduced by 3 or not
-    features2 = extract_features(frames2, model)
-    
-    # Convert features to CPU if needed
-    features1 = features1.cpu()
-    features2 = features2.cpu()
+        # Extract features
+        features1 = extract_features(frames1, model)         # time dimension is reduced by 3 or not
+        features2 = extract_features(frames2, model)
+        
+        # Convert features to CPU if needed
+        features1 = features1.cpu()
+        features2 = features2.cpu()
 
-    # Compute similarities between embs1 and embs2
-    dist = get_scaled_similarity(features1, features2, 'l2', 0.1)       # [N1/3, N2/3] or [N1, N2]
-    matches = dist.argmin(1)      # [N1/3] or [N1]
-    
-    # Get aligned frames
-    aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, matches, use_desampling)
-    
-    # Create side-by-side visualization
-    if use_desampling:
-        frame1_indices = np.arange(0, len(aligned_frames1) * 3, 3)
-        frame2_indices_cur = matches.numpy() * 3
-    else:
-        frame1_indices = np.arange(0, len(aligned_frames1))
-        frame2_indices_cur = matches.numpy()
-    frame2_indices_last = np.roll(frame2_indices_cur, 1)
-    combined_frames = [
-        create_side_by_side_frame(f1, f2, f1i, f2ic, f2il) 
-        for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
-    ]
-    
-    if use_desampling:
-        fps1 = fps1 // 3
-    if output_path:
-        h, w = aligned_frames1[0].shape[:2]
-        save_video(
-            combined_frames,
-            output_path,
-            fps1,  # Divide FPS by 3 since we're using every 3rd frame
-            (w*2, h)  # Double width for side-by-side
-        )
+        # Compute similarities between embs1 and embs2
+        dist = get_scaled_similarity(features1, features2, 'l2', 0.1)       # [N1/3, N2/3] or [N1, N2]
+        matches = dist.argmin(1)      # [N1/3] or [N1]
+        
+        # Get aligned frames
+        aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, matches, downsample)
+        
+        # Create side-by-side visualization
+        if downsample:
+            frame1_indices = np.arange(1, len(aligned_frames1) * 3, 3)      # starts from the second frame actually
+            frame2_indices_cur = matches.numpy() * 3 + 1
+        else:
+            frame1_indices = np.arange(0, len(aligned_frames1))
+            frame2_indices_cur = matches.numpy()
+        frame2_indices_last = np.roll(frame2_indices_cur, 1)
+        combined_frames = [
+            create_side_by_side_frame(f1, f2, f1i, f2ic, f2il) 
+            for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
+        ]
+        
+        if downsample:
+            fps1 = fps1 // 3
+        if output_path:
+            h, w = aligned_frames1[0].shape[:2]
+            save_video(
+                combined_frames,
+                output_path,
+                fps1,  # Divide FPS by 3 since we're using every 3rd frame
+                (w*2, h)  # Double width for side-by-side
+            )
 
 # def check_aligned_frame(video1_path: str, video2_path: str, model: ModelWrapper, i: int):
 #     """Check the ith frame in video1 and its aligned frame in video2.
@@ -282,24 +396,38 @@ def main():
 
     def parse_args():
         parser = argparse.ArgumentParser(description="Align videos with optional downsampling.")
-        parser.add_argument('--use_downsampling', action='store_true', help='Use downsampling for feature extraction')
+        parser.add_argument('--downsample', action='store_true', help='Use downsampling for feature extraction')
+        parser.add_argument('--dataset', type=str, default='PennAction', help='Dataset to use for alignment')
+        # parser.add_argument('--data_size', type=int, default=0, help='Number of videos to test, 0 for all')
+        parser.add_argument('--ckpt', type=str, default=None, help='Checkpoint to load')
+        parser.add_argument('--mac', action='store_true', help='Use mac to run the code')
+        parser.add_argument('--valonval', action='store_true', help='Validate on validation set')
         return parser.parse_args()
 
     args = parse_args()
     
     # Load feature extraction model
-    model = ModelWrapper()  
+    model = ModelWrapper() if args.downsample else ModelWrapper(dont_stack=not args.downsample)
 
     # Find the checkpoint with the smallest val_loss
     checkpoint_dir = 'checkpoints'
     checkpoint_files = os.listdir(checkpoint_dir)
-    checkpoint_files = [file for file in checkpoint_files if file.startswith('model-') and file.endswith('.ckpt')]
-    checkpoint_files.sort(key=lambda x: float(re.search(r'epoch=([0-9])', x).group(1)), reverse=True)
+    if args.ckpt is None:
+        checkpoint_files = [file for file in checkpoint_files if file.startswith('model-') and file.endswith('.ckpt')]
+        checkpoint_files.sort(key=lambda x: float(re.search(r'epoch=([0-9])', x).group(1)), reverse=True)
 
-    # Load the checkpoint with the smallest val_loss
-    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_files[0])
-    model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
-    model.eval()
+        # Load the checkpoint with the smallest val_loss
+        checkpoint_path = os.path.join(checkpoint_dir, checkpoint_files[0])
+        model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
+        model.eval()
+    else:
+        # Load the specified checkpoint
+        checkpoint_path = os.path.join(checkpoint_dir, args.ckpt)
+        if args.mac:
+            model.load_state_dict(torch.load(checkpoint_path, map_location=torch.device('cpu'))['state_dict'])
+        else:
+            model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
+        model.eval()
 
     if torch.cuda.is_available():
         model = model.cuda()
@@ -308,11 +436,13 @@ def main():
     
     # Align videos
     align_videos(
-        video1_path='../data/GolfDB/1.mp4',
-        video2_path='../data/GolfDB/3.mp4',
+        video1_path='../data/GolfDB/0.mp4',
+        video2_path='../data/GolfDB/2.mp4',
         model=model,
-        output_path='aligned_videos.mp4'
-        use_desampling=args.use_downsampling
+        output_path='aligned_videos.mp4',
+        downsample=args.downsample, 
+        dataset=args.dataset,
+        valonval=args.valonval
     )
 
     # # Check aligned frame

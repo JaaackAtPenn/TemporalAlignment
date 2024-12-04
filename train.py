@@ -63,7 +63,7 @@ def collate_fn(batch):
     # for item in batch:
     #     print(item.shape)
     
-    sequences = [item for item in batch]
+    sequences, sampled_indices, seq_lens = zip(*batch)
     
     # Get max sequence length in this batch
     max_len = max([seq.shape[0] for seq in sequences])
@@ -71,14 +71,17 @@ def collate_fn(batch):
     
     # Create padded batch
     padded_batch = torch.zeros(len(sequences), max_len, C, H, W)
+    sampled_indices_tensor = torch.zeros(len(sequences), max_len)
+    seq_lens_tensor = torch.tensor(seq_lens)
     for i, seq in enumerate(sequences):
         T = seq.shape[0]
         padded_batch[i, :T] = seq
+        sampled_indices_tensor[i, :T] = torch.tensor(sampled_indices[i])
 
-    return padded_batch
+    return padded_batch, sampled_indices_tensor, seq_lens_tensor
 
 class FrameSequenceDataset(Dataset):
-    def __init__(self, root_dir, resize=(224, 224)):
+    def __init__(self, root_dir, resize=(224, 224), use_golf_folders=True, data_size=0):
         """
         Args:
             root_dir (str): Path to the root directory containing video folders.
@@ -90,7 +93,12 @@ class FrameSequenceDataset(Dataset):
         self.sequences = []  # each item is a list of image paths
 
         # get golf folders
-        self.sequences_folder = self._filter_folders()
+        if use_golf_folders:
+            self.sequences_folder = self._filter_folders()
+        else:
+            self.sequences_folder = self._all_folders()        # try to train with all actions in PennAction like in the paper, maybe it will learn the similarity between poses better
+        if data_size > 0:
+            self.sequences_folder = self.sequences_folder[:data_size]
         # get all image files in this sequence, sorted by name
         for sequence_folder in self.sequences_folder:
             sequence_path = os.path.join(root_dir, sequence_folder)
@@ -121,16 +129,25 @@ class FrameSequenceDataset(Dataset):
             sampled_indices = sorted(random.sample(range(len(sequence)), self.shortest_sequence_length))
             sampled_sequence = [sequence[i] for i in sampled_indices]
         else:
+            sampled_indices = list(range(len(sequence)))
             sampled_sequence = sequence
 
         frames = []
         for img_path in sampled_sequence[:self.shortest_sequence_length]:
             img = Image.open(img_path).convert("RGB")
+            # plt.imshow(img)
+            # plt.show()
+            # print(f"Before transform: Image size: {img.size}, mode: {img.mode}")
             img = self.transform(img)
+            # print(f"After transform: Tensor shape: {img.shape}, dtype: {img.dtype}")
             frames.append(img)
+            # print(f"Image shape: {img.shape}")
+            # print(f"Image min: {img.min()}, max: {img.max()}")
+            # print(f"Image dot sample: {img[0, 0, 0]}")
+            # print(f"Image dot type: {img.dtype}")
 
         frames = torch.stack(frames)
-        return frames
+        return frames, sampled_indices, len(sequence)         # sampled_indices and len(sequence) are used for alignment loss
     
     def _filter_folders(self):
         folders = [folder for folder in self.root_dir.iterdir() if folder.is_dir()]
@@ -141,11 +158,20 @@ class FrameSequenceDataset(Dataset):
         ]
         return sorted(filtered_folders, key=lambda x: int(x.name))
     
+    def _all_folders(self):
+        folders = [folder for folder in self.root_dir.iterdir() if folder.is_dir()]
+        filtered_folders = [
+            folder.resolve() for folder in folders
+            # Glof video indices: 0789 - 0954
+            # if 789 <= int(folder.name) <= 954
+        ]
+        return sorted(filtered_folders, key=lambda x: int(x.name))
+    
 class LitModel(pl.LightningModule):
-    def __init__(self, model=None, loss_type='regression_mse_var', similarity_type='l2', temperature=0.1, variance_lambda=0.001, use_random_window=False, use_align_alpha=False, align_alpha_strength=0.1, do_not_reduce_frame_rate=False):
+    def __init__(self, model=None, loss_type='regression_mse_var', similarity_type='l2', temperature=0.1, variance_lambda=0.001, use_random_window=False, use_align_alpha=False, align_alpha_strength=0.1, do_not_reduce_frame_rate=False, small_embedder=False, dont_stack=False):
         super().__init__()
         print("Initializing LitModel...")
-        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate)
+        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate, small_embedder=small_embedder, dont_stack=dont_stack)
         self.loss_type = loss_type
         self.similarity_type = similarity_type
         self.temperature = temperature
@@ -155,17 +181,17 @@ class LitModel(pl.LightningModule):
         self.align_alpha_strength = align_alpha_strength
                 
     def training_step(self, batch, batch_idx):
-        x = batch
+        x, steps, seq_lens = batch
         y_hat = self(x)
-        loss = compute_alignment_loss(y_hat, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
+        loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
         self.log('train_loss', loss)
         return loss
         
     def validation_step(self, batch, batch_idx):
-        x = batch
+        x, steps, seq_lens = batch
         with torch.no_grad():
             y_hat = self(x)
-        loss = compute_alignment_loss(y_hat, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
+        loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
         self.log('val_loss', loss)
         return loss
         
@@ -213,72 +239,138 @@ def DBgolf():
     val_dataset = VideoDataset(val_files)
     return train_dataset, val_dataset
 
-def PennAction():
+def PennAction(use_golf_folders=True, data_size=0, dont_split=False, use_batch_minlen=False):
     print("Starting training process...")
     print("Loading video files...")
-    frame_dir = Path('./data/Penn_Action/Penn_Action/frames')
+    # frame_dir = Path('./data/Penn_Action/Penn_Action/frames')
+    frame_dir = Path('../data/PennAction')
     
     if frame_dir.exists() and frame_dir.is_dir():
-        dataset = FrameSequenceDataset(frame_dir)
+        dataset = FrameSequenceDataset(frame_dir, use_golf_folders=use_golf_folders, data_size=data_size)
 
         print(f"Total sequences in dataset: {len(dataset)}")
         print(f"Shortest sequence length: {dataset.shortest_sequence_length}")
 
-        # Reduce the dataset to the first 10 sequences
-        max_sequences = 4
+        # Reduce the dataset to the first data_size sequences
+        max_sequences = len(dataset)
         dataset = torch.utils.data.Subset(dataset, range(min(max_sequences, len(dataset))))
         print(f"Reduced dataset size: {len(dataset)}")
 
-        # Split dataset into train and validation sets
-        dataset_size = len(dataset)
-        train_size = int(0.8 * dataset_size)
-        val_size = dataset_size - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
-        
-        print(f"Dataset split: {train_size} training sequences, {val_size} validation sequences.")
-        return train_dataset, val_dataset
+        if dont_split:
+            return dataset
+        else:
+            # Split dataset into train and validation sets
+            dataset_size = len(dataset)
+            train_size = int(0.8 * dataset_size)
+            val_size = dataset_size - train_size
+            train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+            
+            print(f"Dataset split: {train_size} training sequences, {val_size} validation sequences.")
+            return train_dataset, val_dataset
     else:
         print("Directory does not exist or is not a valid directory.")
         return None, None
+    
+def count_model_parameters(model, model_name=""):
+    """
+    Count trainable and frozen parameters of a model.
+
+    Args:
+        model (nn.Module): The PyTorch model to count parameters.
+        model_name (str): Name of the model (for display).
+
+    Returns:
+        dict: Dictionary with trainable and frozen parameter counts.
+    """
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen_params = total_params - trainable_params
+
+    print(f"{model_name} Parameters:")
+    print(f"  Total parameters: {total_params}")
+    print(f"  Trainable parameters: {trainable_params}")
+    print(f"  Frozen parameters: {frozen_params}")
+
+    return {
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+        "frozen_params": frozen_params,
+    }
+
+def print_parameter_details(model, model_name="Model"):
+    """
+    Print details of each parameter in the model.
+
+    Args:
+        model (nn.Module): PyTorch model.
+        model_name (str): Name of the model.
+    """
+    print(f"{model_name} Parameter Details:")
+    for name, param in model.named_parameters():
+        print(f"  {name}: {param.numel()} parameters, requires_grad={param.requires_grad}")
     
 def train(args):
     print(f"Using dataset: {args.dataset}")
     if args.dataset == 'GolfDB':
         train_dataset, val_dataset = DBgolf()
     elif args.dataset == 'PennAction':
-        train_dataset, val_dataset = PennAction()
+        train_dataset, val_dataset = PennAction(args.use_golf_folders, args.data_size, args.use_batch_minlen)
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
         
     print("Creating data loaders...")
+    num_workers = 15 if args.mac else 21
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=2, 
+        batch_size=args.batch_size, 
         collate_fn=collate_fn,
-        drop_last=True 
+        drop_last=True,
+        shuffle=True,
+        num_workers=num_workers
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=4, 
         collate_fn=collate_fn,
-        drop_last=True 
+        drop_last=True,
+        shuffle=False,
+        num_workers=num_workers
     )
     
     print("Initializing model...")
-    model = LitModel()
-    
+    model = LitModel(loss_type=args.loss_type, similarity_type=args.similarity_type, temperature=args.temperature, variance_lambda=args.variance_lambda, use_random_window=args.use_random_window, use_align_alpha=args.use_align_alpha, align_alpha_strength=args.align_alpha_strength, do_not_reduce_frame_rate=args.do_not_reduce_frame_rate, small_embedder=args.small_embedder, dont_stack=args.dont_stack)
+
+    base_model_stats = count_model_parameters(model.model.cnn, "BaseModel")
+    conv_embedder_stats = count_model_parameters(model.model.emb, "ConvEmbedder")
+    # print_parameter_details(model.model.cnn, "BaseModel")
+    print_parameter_details(model.model.emb, "ConvEmbedder")
+    print('Model initialized!')
+    print(model)
+
     print("Setting up training callbacks and logger...")
     filename = 'model-{epoch:02d}-{val_loss:.2f}'
     filename += f"{args.loss_type}_{args.similarity_type}_temp_{args.temperature}_var_{args.variance_lambda}_random_window_{args.use_random_window}_align_alpha_{args.use_align_alpha}_align_alpha_strength_{args.align_alpha_strength}_do_not_reduce_frame_rate_{args.do_not_reduce_frame_rate}"
-    checkpoint_callback = ModelCheckpoint(
-        monitor='val_loss',
-        dirpath='checkpoints',
-        filename=filename,
-        save_top_k=3,
-        mode='min',
-    )
+    if args.validate:
+        checkpoint_callback = ModelCheckpoint(
+            monitor='val_loss',
+            dirpath='checkpoints',
+            filename=filename,
+            save_top_k=3,
+            mode='min',
+        )
+    else:
+        checkpoint_callback = ModelCheckpoint(
+            monitor='train_loss',
+            dirpath='checkpoints',
+            filename=filename,
+            save_top_k=3,
+            mode='min',
+        )
     
     logger = TensorBoardLogger("lightning_logs", name="my_model")
+
+    hparams = vars(args)
+    logger.log_hyperparams(hparams)
     
     print("Initializing trainer...")
     trainer = pl.Trainer(
@@ -289,32 +381,12 @@ def train(args):
     )
     
     print("Starting model training...")
-    trainer.fit(model, train_loader, train_loader)
+    if args.validate:
+        trainer.fit(model, train_loader, val_loader)
+    else:
+        # trainer.fit(model, train_loader, train_loader)
+        trainer.fit(model, train_loader)
     print("Training complete!")
-
-def plot_loss(log_dir):
-    print("Plotting loss...")
-
-    ea = event_accumulator.EventAccumulator(log_dir)
-    ea.Reload()
-
-    train_loss = ea.Scalars('train_loss')
-    val_loss = ea.Scalars('val_loss')
-
-    train_steps = [x.step for x in train_loss]
-    train_values = [x.value for x in train_loss]
-
-    val_steps = [x.step for x in val_loss]
-    val_values = [x.value for x in val_loss]
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_steps, train_values, label='Train Loss')
-    plt.plot(val_steps, val_values, label='Validation Loss')
-    plt.xlabel('Steps')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.show()
 
 if __name__ == "__main__":
     def parse_args():
@@ -329,10 +401,23 @@ if __name__ == "__main__":
         parser.add_argument('--do_not_reduce_frame_rate', action='store_true', help='Whether to reduce frame rate to 10fps')
         parser.add_argument('--use_120fps', action='store_true', help='Whether to use 120fps videos')
         parser.add_argument('--dataset', type=str, default='PennAction', choices=['GolfDB', 'PennAction'], help='Dataset to use for training')
+        parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+        parser.add_argument('--use_golf_folders', action='store_true', help='Whether to use only golf folders in PennAction dataset')
+        parser.add_argument('--data_size', type=int, default=0, help='Number of sequences to use from PennAction dataset, 0 for all')
+        parser.add_argument('--dont_stack', action='store_true', help='Whether to stack temperal features')        # do not downsample
+        parser.add_argument('--mac', action='store_true', help='Whether to use Mac to train')
+        parser.add_argument('--precise_tensor', action='store_true', help='Whether to use high precision tensorfloat')
+        parser.add_argument('--batch_size', type=int, default=2, help='Batch size for training')
+        parser.add_argument('--validate', action='store_true', help='Whether to validate')
+        parser.add_argument('--small_embedder', action='store_true', help='Whether to use a smaller embedder')           # reduce channels from 512 to 256
+        parser.add_argument('--use_batch_minlen', action='store_true', help='Whether to use the shortest video length within a batch, rather than the whole dataset')         # To keep the frames as many as possible
         return parser.parse_args()
 
     args = parse_args()
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if not args.mac:
+        torch.set_float32_matmul_precision('high' if args.precise_tensor else 'medium')
     print("Script started...")
     train(args)
     print("Script complete!")
-    # plot_loss('lightning_logs/my_model')
