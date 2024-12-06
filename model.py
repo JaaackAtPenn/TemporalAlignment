@@ -98,7 +98,7 @@ class BaseModel(nn.Module):
     def forward(self, x):        
         batch_size, num_frames, channels, height, width = x.shape
         x = x.view(batch_size * num_frames, channels, height, width)
-        print('x shape:', x.shape)
+        # print('x shape:', x.shape)
 
         # Extract features
         features = self.base_model(x)
@@ -106,7 +106,7 @@ class BaseModel(nn.Module):
         # Restore temporal dimension
         feature_channels, h, w = features.shape[1:]
         features = features.view(batch_size, num_frames, feature_channels, h, w)
-        print('features shape:', features.shape)
+        # print('features shape:', features.shape)
 
         return features
     

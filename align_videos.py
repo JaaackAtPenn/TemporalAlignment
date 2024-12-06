@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Tuple, Union
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from dtw import dtw
+from torch.nn import functional as F
 
 from model import ModelWrapper
 from losses import get_scaled_similarity
@@ -195,7 +197,12 @@ def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: t
     # Make sure frames match in count
     return aligned_frames1, aligned_frames2
 
-def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False):
+def euclidean_distance(x, y):
+    x = x.cpu().numpy() if isinstance(x, torch.Tensor) else x
+    y = y.cpu().numpy() if isinstance(y, torch.Tensor) else y
+    return np.sqrt(np.sum((x - y) ** 2))
+
+def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False):
     """Align two videos using extracted features and save aligned result.
     
     Args:
@@ -270,7 +277,54 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             features2 = features2.cpu()
             # print('features1:', features1.shape)
             # print('features2:', features2.shape)
-            dist = get_scaled_similarity(features1, features2, 'l2', 0.1)
+            dist = get_scaled_similarity(features1, features2, 'l2', 0.1)      # [N1, N2]
+            self_dist1 = get_scaled_similarity(features1, features1, 'l2', 0.1)
+            self_dist2 = get_scaled_similarity(features2, features2, 'l2', 0.1)
+
+            softmaxed_dist = F.softmax(dist, dim=1)         # [N1, N2], alpha
+            nn_embs = torch.mm(softmaxed_dist, features2)          # [N1, D], tilda v_i
+            cycle_dist = get_scaled_similarity(nn_embs, features1, 'l2', 0.1)       # [N1, N1]
+            print('cycle_dist:', cycle_dist)
+
+            # Plot distance matrix as heatmap
+            plt.figure(figsize=(10, 8))
+            plt.imshow(dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+            plt.colorbar()
+            plt.title('Distance HeatMap')
+            plt.xlabel('Frames of Video {}'.format(i))
+            plt.ylabel('Frames of Video {}'.format(i+1))
+            plt.savefig('result/distance_heatmap_{}and{}.png'.format(i, i+1))            
+            # plt.show()
+
+            # Plot self distance matrix as heatmap
+            plt.figure(figsize=(10, 8))
+            plt.imshow(self_dist1.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+            plt.colorbar()
+            plt.title('Self Distance HeatMap of Video {}'.format(i))
+            plt.xlabel('Frames of Video {}'.format(i))
+            plt.ylabel('Frames of Video {}'.format(i))
+            plt.savefig('result/self_distance_heatmap_{}.png'.format(i))
+            # plt.show()
+
+            # Plot self distance matrix as heatmap
+            plt.figure(figsize=(10, 8))
+            plt.imshow(self_dist2.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+            plt.colorbar()
+            plt.title('Self Distance HeatMap of Video {}'.format(i+1))
+            plt.xlabel('Frames of Video {}'.format(i+1))
+            plt.ylabel('Frames of Video {}'.format(i+1))
+            plt.savefig('result/self_distance_heatmap_{}.png'.format(i+1))
+            # plt.show()
+
+            # Plot cycle distance matrix as heatmap
+            plt.figure(figsize=(10, 8))
+            plt.imshow(cycle_dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+            plt.colorbar()
+            plt.title('Cycle Distance Heatmap of Video {} with {}'.format(i, i+1))
+            plt.xlabel('Selected Frames of Video {}'.format(i+1))
+            plt.ylabel('Frames of Original Video {}'.format(i))
+            plt.savefig('result/cycle_distance_heatmap_{}and{}.png'.format(i, i+1))
+
             matches = dist.argmin(1)
             # print('matches:', matches)
             aligned_frames1, aligned_frames2 = get_aligned_frames(frames[0], frames[1], matches, downsample)
@@ -288,7 +342,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
                 create_side_by_side_frame(f1, f2, f1i, f2ic, f2il) 
                 for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
             ]
-            output_path = 'result/aligned_videos{}and{}.mp4'.format(i, i+1)
+            output_path = 'result/aligned_videos{}and{}DTW{}.mp4'.format(i, i+1, use_dtw)
             # plt.imshow(combined_frames[0])
             # plt.title('First Frame of Combined Frames')
             # plt.show()
@@ -319,23 +373,85 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
 
         # Compute similarities between embs1 and embs2
         dist = get_scaled_similarity(features1, features2, 'l2', 0.1)       # [N1/3, N2/3] or [N1, N2]
-        matches = dist.argmin(1)      # [N1/3] or [N1]
-        
-        # Get aligned frames
-        aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, matches, downsample)
-        
-        # Create side-by-side visualization
-        if downsample:
-            frame1_indices = np.arange(1, len(aligned_frames1) * 3, 3)      # starts from the second frame actually
-            frame2_indices_cur = matches.numpy() * 3 + 1
+        self_dist = get_scaled_similarity(features1, features1, 'l2', 0.1)
+
+        # Plot distance matrix as heatmap
+        plt.figure(figsize=(10, 8))
+        plt.imshow(dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+        plt.colorbar()
+        plt.title('Distance Heatmap')
+        plt.xlabel('Frames of Video 2')
+        plt.ylabel('Frames of Video 1')
+        plt.savefig(output_path[:-4] + '_distance_heatmap.png')
+        # plt.show()
+
+        # Plot self distance matrix as heatmap
+        plt.figure(figsize=(10, 8))
+        plt.imshow(self_dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+        plt.colorbar()
+        plt.title('Self Distance Heatmap')
+        plt.xlabel('Frames of Video 1')
+        plt.ylabel('Frames of Video 1')
+        plt.savefig(output_path[:-4] + '_self_distance_heatmap.png')
+        # plt.show()
+
+        softmaxed_dist_12 = F.softmax(dist, dim=1)         # alpha
+        nn_embs = torch.mm(softmaxed_dist_12, features2)          # [N1, D], tilda v_i
+        cycle_dist = get_scaled_similarity(nn_embs, features1, 'l2', 0.1)       # [N1, N1]
+
+        # Plot cycle distance matrix as heatmap
+        plt.figure(figsize=(10, 8))
+        plt.imshow(cycle_dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+        plt.colorbar()
+        plt.title('Cycle Distance Heatmap')
+        plt.xlabel('Frames of Video 1')
+        plt.ylabel('Frames of Video 1')
+        plt.savefig(output_path[:-4] + '_cycle_distance_heatmap.png')
+        # plt.show()
+
+        if use_dtw:
+            # Find the minimum cost assignment using dynamic time warping
+            dtw_result = dtw(features1, features2, dist=euclidean_distance)
+            # print('dtw_result:', dtw_result)
+            index1, index2 = dtw_result[-1]
+            print('index1:', index1)
+            print('index1 shape:', index1.shape)
+            print('index2:', index2)
+            print('index2 shape:', index2.shape)
+            
+            # Get aligned frames
+            aligned_frames1, aligned_frames2 = frames1[index1], frames2[index2]
+
+            # Create side-by-side visualization
+            if downsample:
+                frame1_indices = index1 * 3 + 1
+                frame2_indices_cur = index2 * 3 + 1
+            else:
+                frame1_indices = index1
+                frame2_indices_cur = index2
+            frame2_indices_last = np.roll(frame2_indices_cur, 1)
+            combined_frames = [
+                create_side_by_side_frame(f1, f2, f1i, f2ic, f2il) 
+                for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
+            ]
         else:
-            frame1_indices = np.arange(0, len(aligned_frames1))
-            frame2_indices_cur = matches.numpy()
-        frame2_indices_last = np.roll(frame2_indices_cur, 1)
-        combined_frames = [
-            create_side_by_side_frame(f1, f2, f1i, f2ic, f2il) 
-            for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
-        ]
+            matches = dist.argmin(1)      # [N1/3] or [N1]
+            
+            # Get aligned frames
+            aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, matches, downsample)
+        
+            # Create side-by-side visualization
+            if downsample:
+                frame1_indices = np.arange(1, len(aligned_frames1) * 3, 3)      # starts from the second frame actually
+                frame2_indices_cur = matches.numpy() * 3 + 1
+            else:
+                frame1_indices = np.arange(0, len(aligned_frames1))
+                frame2_indices_cur = matches.numpy()
+            frame2_indices_last = np.roll(frame2_indices_cur, 1)
+            combined_frames = [
+                create_side_by_side_frame(f1, f2, f1i, f2ic, f2il) 
+                for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
+            ]
         
         if downsample:
             fps1 = fps1 // 3
@@ -402,6 +518,9 @@ def main():
         parser.add_argument('--ckpt', type=str, default=None, help='Checkpoint to load')
         parser.add_argument('--mac', action='store_true', help='Use mac to run the code')
         parser.add_argument('--valonval', action='store_true', help='Validate on validation set')
+        parser.add_argument('--vidpath1', type=str, default='GolfDB/0.mp4', help='Path to the first video')
+        parser.add_argument('--vidpath2', type=str, default='GolfDB/2.mp4', help='Path to the second video')
+        parser.add_argument('--use_dtw', action='store_true', help='Use dynamic time warping for alignment')
         return parser.parse_args()
 
     args = parse_args()
@@ -435,14 +554,20 @@ def main():
         model = model.to('mps')
     
     # Align videos
+    video_dir = '../data/'
+    video1_path = video_dir + args.vidpath1
+    video2_path = video_dir + args.vidpath2
+    output_path = args.vidpath1.split('/')[1][:-4] + '&' + args.vidpath2.split('/')[1][:-4] + 'withDTW' + str(args.use_dtw) + '.mp4'
+    output_path = 'result/' + output_path
     align_videos(
-        video1_path='../data/GolfDB/0.mp4',
-        video2_path='../data/GolfDB/2.mp4',
+        video1_path=video1_path,
+        video2_path=video2_path,
         model=model,
-        output_path='aligned_videos.mp4',
+        output_path=output_path,
         downsample=args.downsample, 
         dataset=args.dataset,
-        valonval=args.valonval
+        valonval=args.valonval,
+        use_dtw=args.use_dtw
     )
 
     # # Check aligned frame

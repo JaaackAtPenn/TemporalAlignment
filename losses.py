@@ -13,7 +13,7 @@ def classification_loss(logits, labels, label_smoothing):
     loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     loss = loss_fn(logits, targets)
 
-    return loss
+    return loss, 0.0
 
 def regression_loss(logits, labels, alpha, num_steps, steps, seq_lens, steps_j, seq_lens_j,
                     loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, window_size, use_align_alpha, align_alpha_strength):
@@ -57,15 +57,15 @@ def regression_loss(logits, labels, alpha, num_steps, steps, seq_lens, steps_j, 
             squared_error = (true_time - pred_time) ** 2
 
             loss = torch.mean(torch.exp(-pred_time_log_var) * squared_error + variance_lambda * pred_time_log_var)
-            return loss + align_alpha_loss
+            return loss, align_alpha_loss
         else:
             # Standard MSE loss, without log variance normalization
             loss = F.mse_loss(pred_time, true_time)
-            return loss + align_alpha_loss
+            return loss, align_alpha_loss
     elif loss_type == 'regression_huber':
         # Huber loss (Smooth L1 loss in PyTorch)
         loss = F.smooth_l1_loss(pred_time, true_time, beta=huber_delta)
-        return loss + align_alpha_loss
+        return loss, align_alpha_loss
     else:
         raise ValueError(f"Unsupported regression loss '{loss_type}'. Supported losses are: "
                          "regression_mse, regression_mse_var, regression_huber.")
@@ -76,7 +76,7 @@ def pairwise_l2_distance(embs1, embs2):
     # norm2 = torch.sum(embs2 ** 2, dim=1).unsqueeze(1)  # [1, N2]
     # dist = torch.clamp(norm1 + norm2 - 2.0 * torch.mm(embs1, embs2.t()), min=0.0)
     diff = embs1.unsqueeze(1) - embs2.unsqueeze(0)
-    dist = -torch.sum(diff ** 2, dim=2)
+    dist = torch.sum(diff ** 2, dim=2)
     return dist      # [N1, N2], every element is the squared L2 distance between a pair of embeddings
 
 def get_scaled_similarity(embs1, embs2, similarity_type, temperature):
@@ -171,9 +171,9 @@ def compute_deterministic_alignment_loss(embs,
     seq_lens_j = torch.cat(seq_lens_j_list, dim=0)      # [N(N-1)*T]
 
     if loss_type == 'classification':
-        loss = classification_loss(logits, labels, label_smoothing)
+        loss, align_alpha_loss = classification_loss(logits, labels, label_smoothing)
     elif 'regression' in loss_type:
-        loss = regression_loss(
+        loss, align_alpha_loss = regression_loss(
             logits, labels, alpha, num_steps, steps, seq_lens, steps_j, seq_lens_j,
             loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, window_size, use_align_alpha, align_alpha_strength
         )
@@ -181,7 +181,7 @@ def compute_deterministic_alignment_loss(embs,
         raise ValueError(f"Unidentified loss_type {loss_type}. Currently supported loss "
                          "types are: regression_mse, regression_huber, classification.")
 
-    return loss
+    return loss, align_alpha_loss
 
 def _align_single_cycle(cycle, embs, cycle_length, num_steps,
                         similarity_type, temperature):
@@ -293,11 +293,11 @@ def compute_stochastic_alignment_loss(embs,
     )
 
     if loss_type == 'classification':
-        loss = classification_loss(logits, labels, label_smoothing)
+        loss, align_alpha_loss = classification_loss(logits, labels, label_smoothing)
     elif 'regression' in loss_type:
         steps_selected = steps[cycles[:, 0]]     # [num_cycles, T], sampled steps of u in each cycle
         seq_lens_selected = seq_lens[cycles[:, 0]]       # [num_cycles], sequence lengths of u in each cycle
-        loss = regression_loss(
+        loss, align_alpha_loss = regression_loss(
             logits, labels, num_steps, steps_selected, seq_lens_selected,
             loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, use_align_alpha
         )
@@ -305,7 +305,7 @@ def compute_stochastic_alignment_loss(embs,
         raise ValueError(f"Unidentified loss type {loss_type}. Currently supported loss "
                          "types are: regression_mse, regression_huber, classification.")
 
-    return loss
+    return loss, align_alpha_loss
 
 def compute_alignment_loss(embs,          # [B, T, D]
                            batch_size,          
@@ -356,7 +356,7 @@ def compute_alignment_loss(embs,          # [B, T, D]
         embs = F.normalize(embs, p=2, dim=-1)
 
     if stochastic_matching:
-        loss = compute_stochastic_alignment_loss(
+        loss, align_alpha_loss = compute_stochastic_alignment_loss(
             embs=embs,
             steps=steps,
             seq_lens=seq_lens,
@@ -376,7 +376,7 @@ def compute_alignment_loss(embs,          # [B, T, D]
             use_align_alpha=use_align_alpha,
             align_alpha_strength=align_alpha_strength)
     else:
-        loss = compute_deterministic_alignment_loss(          # compute loss between all pairs of sequences
+        loss, align_alpha_loss = compute_deterministic_alignment_loss(          # compute loss between all pairs of sequences
             embs=embs,
             steps=steps,
             seq_lens=seq_lens,
@@ -394,4 +394,4 @@ def compute_alignment_loss(embs,          # [B, T, D]
             use_align_alpha=use_align_alpha,
             align_alpha_strength=align_alpha_strength)
 
-    return loss
+    return loss, align_alpha_loss

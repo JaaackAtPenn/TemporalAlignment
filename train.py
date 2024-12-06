@@ -183,17 +183,23 @@ class LitModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, steps, seq_lens = batch
         y_hat = self(x)
-        loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
-        self.log('train_loss', loss)
-        return loss
+        similarity_loss, time_loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
+        total_loss = similarity_loss + time_loss
+        self.log('train_similarity_loss', similarity_loss)
+        self.log('train_time_loss', time_loss)
+        self.log('train_total_loss', total_loss)
+        return total_loss
         
     def validation_step(self, batch, batch_idx):
         x, steps, seq_lens = batch
         with torch.no_grad():
             y_hat = self(x)
-        loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
-        self.log('val_loss', loss)
-        return loss
+        similarity_loss, time_loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
+        total_loss = similarity_loss + time_loss
+        self.log('val_similarity_loss', similarity_loss)
+        self.log('val_time_loss', time_loss)
+        self.log('val_total_loss', total_loss)
+        return total_loss
         
     def configure_optimizers(self):
         print("Configuring optimizer...")
@@ -326,7 +332,8 @@ def train(args):
         collate_fn=collate_fn,
         drop_last=True,
         shuffle=True,
-        num_workers=num_workers
+        num_workers=num_workers,
+        persistent_workers=True
     )
     val_loader = DataLoader(
         val_dataset, 
@@ -334,7 +341,8 @@ def train(args):
         collate_fn=collate_fn,
         drop_last=True,
         shuffle=False,
-        num_workers=num_workers
+        num_workers=num_workers,
+        persistent_workers=True
     )
     
     print("Initializing model...")
@@ -352,7 +360,7 @@ def train(args):
     filename += f"{args.loss_type}_{args.similarity_type}_temp_{args.temperature}_var_{args.variance_lambda}_random_window_{args.use_random_window}_align_alpha_{args.use_align_alpha}_align_alpha_strength_{args.align_alpha_strength}_do_not_reduce_frame_rate_{args.do_not_reduce_frame_rate}"
     if args.validate:
         checkpoint_callback = ModelCheckpoint(
-            monitor='val_loss',
+            monitor='val_total_loss',
             dirpath='checkpoints',
             filename=filename,
             save_top_k=3,
@@ -360,7 +368,7 @@ def train(args):
         )
     else:
         checkpoint_callback = ModelCheckpoint(
-            monitor='train_loss',
+            monitor='train_total_loss',
             dirpath='checkpoints',
             filename=filename,
             save_top_k=3,
