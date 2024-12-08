@@ -179,6 +179,8 @@ class LitModel(pl.LightningModule):
         self.use_random_window = use_random_window
         self.use_align_alpha = use_align_alpha
         self.align_alpha_strength = align_alpha_strength
+        # self.training_outputs = []
+        # self.validation_outputs = []
                 
     def training_step(self, batch, batch_idx):
         x, steps, seq_lens = batch
@@ -188,7 +190,18 @@ class LitModel(pl.LightningModule):
         self.log('train_similarity_loss', similarity_loss)
         self.log('train_time_loss', time_loss)
         self.log('train_total_loss', total_loss)
+        # self.training_outputs.append({'loss': total_loss, 'similarity_loss': similarity_loss, 'time_loss': time_loss})
+        # return {'loss': total_loss, 'similarity_loss': similarity_loss, 'time_loss': time_loss}
         return total_loss
+    
+    # def on_train_epoch_end(self):
+    #     avg_loss = torch.stack([x['loss'] for x in self.training_outputs]).mean()
+    #     avg_similarity_loss = torch.stack([x['similarity_loss'] for x in self.training_outputs]).mean()
+    #     avg_time_loss = torch.stack([x['time_loss'] for x in self.training_outputs]).mean()
+
+    #     print(f"Epoch {self.current_epoch}: Avg Loss: {avg_loss}, Avg Similarity Loss: {avg_similarity_loss}, Avg Time Loss: {avg_time_loss}")
+        
+    #     self.training_outputs.clear()
         
     def validation_step(self, batch, batch_idx):
         x, steps, seq_lens = batch
@@ -199,7 +212,18 @@ class LitModel(pl.LightningModule):
         self.log('val_similarity_loss', similarity_loss)
         self.log('val_time_loss', time_loss)
         self.log('val_total_loss', total_loss)
+        # self.validation_outputs.append({'loss': total_loss, 'similarity_loss': similarity_loss, 'time_loss': time_loss})
+        # return {'loss': total_loss, 'similarity_loss': similarity_loss, 'time_loss': time_loss}
         return total_loss
+    
+    # def on_validation_epoch_end(self):
+    #     avg_loss = torch.stack([x['loss'] for x in self.validation_outputs]).mean()
+    #     avg_similarity_loss = torch.stack([x['similarity_loss'] for x in self.validation_outputs]).mean()
+    #     avg_time_loss = torch.stack([x['time_loss'] for x in self.validation_outputs]).mean()
+
+    #     print(f"Validation: Avg Loss: {avg_loss}, Avg Similarity Loss: {avg_similarity_loss}, Avg Time Loss: {avg_time_loss}")
+
+    #     self.validation_outputs.clear()
         
     def configure_optimizers(self):
         print("Configuring optimizer...")
@@ -356,7 +380,7 @@ def train(args):
     print(model)
 
     print("Setting up training callbacks and logger...")
-    filename = 'model-{epoch:02d}-{val_loss:.2f}'
+    filename = 'model-{epoch:02d}-{val_loss:.2f}' if args.validate else 'model-{epoch:02d}-{train_loss:.2f}'
     filename += f"{args.loss_type}_{args.similarity_type}_temp_{args.temperature}_var_{args.variance_lambda}_random_window_{args.use_random_window}_align_alpha_{args.use_align_alpha}_align_alpha_strength_{args.align_alpha_strength}_do_not_reduce_frame_rate_{args.do_not_reduce_frame_rate}"
     if args.validate:
         checkpoint_callback = ModelCheckpoint(
@@ -365,6 +389,7 @@ def train(args):
             filename=filename,
             save_top_k=3,
             mode='min',
+            save_last=True
         )
     else:
         checkpoint_callback = ModelCheckpoint(
@@ -373,6 +398,7 @@ def train(args):
             filename=filename,
             save_top_k=3,
             mode='min',
+            save_last=True
         )
     
     logger = TensorBoardLogger("lightning_logs", name="my_model")
@@ -396,11 +422,15 @@ def train(args):
         trainer.fit(model, train_loader)
     print("Training complete!")
 
+    # Print final training loss
+    final_training_loss = trainer.callback_metrics.get('train_total_loss')
+    print(f"Final Training Loss: {final_training_loss}")
+
 if __name__ == "__main__":
     def parse_args():
         parser = argparse.ArgumentParser(description="Train a video alignment model.")
         parser.add_argument('--loss_type', type=str, default='regression_mse_var', help='Type of loss function to use')
-        parser.add_argument('--similarity_type', type=str, default='l2', help='Type of similarity function to use')
+        parser.add_argument('--similarity_type', type=str, default='cosine', help='Type of similarity function to use')
         parser.add_argument('--temperature', type=float, default=0.1, help='Temperature parameter for contrastive loss')
         parser.add_argument('--variance_lambda', type=float, default=0.001, help='Lambda parameter for variance loss')
         parser.add_argument('--use_random_window', action='store_true', help='Whether to use random window cropping')
@@ -426,6 +456,14 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     if not args.mac:
         torch.set_float32_matmul_precision('high' if args.precise_tensor else 'medium')
-    print("Script started...")
+    print("--------------------------------- Starting Training ---------------------------------")
     train(args)
-    print("Script complete!")
+    print("--------------------------------- Training Complete ---------------------------------")
+
+    # align_alpha_strengths = [0.1, 0.3, 1.0, 3.0, 10.0]
+    # for align_alpha_strength in align_alpha_strengths:
+    #     print(f"Training with align_alpha_strength={align_alpha_strength}")
+    #     print("------------------------------------------------------------------------------------")
+    #     args.align_alpha_strength = align_alpha_strength
+    #     train(args)
+    #     print("------------------------------------------------------------------------------------")
