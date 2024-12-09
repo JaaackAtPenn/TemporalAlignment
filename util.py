@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-def video_to_frames(video_path, target_size=(160, 160), downsample_factor=10):
+def video_to_frames(video_path, target_size=(160, 160), downsample_factor=2):
     """
     Convert a video file to a numpy array of frames with resized dimensions.
     
