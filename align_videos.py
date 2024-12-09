@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 from dtw import dtw
 from torch.nn import functional as F
 import random
-
 from model import ModelWrapper
 from losses import get_scaled_similarity
 from train import PennAction, collate_fn
@@ -19,6 +18,8 @@ from typing import List, Tuple
 import os
 import re
 import argparse
+import seaborn as sns
+
 
 def load_video(video_path: str) -> Tuple[np.ndarray, int, int]:
     """Load video and return frames, fps, and frame count."""
@@ -177,6 +178,7 @@ def display_frames(frames: List[np.ndarray], fps: int):
     cv2.destroyAllWindows()
 
 def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: torch.Tensor, downsample) -> Tuple[np.ndarray, np.ndarray]:
+
     """Get aligned frames using computed indices.
     
     Args:
@@ -194,6 +196,7 @@ def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: t
     else:
         aligned_frames2 = frames2[aligned_idxs.numpy()]
         aligned_frames1 = frames1
+
 
     # Make sure frames match in count
     return aligned_frames1, aligned_frames2
@@ -482,6 +485,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
 #     """
 #     if i % 3 != 0:
 #         raise ValueError("Frame index i must be a multiple of 3")
+
     
 #     # Load videos
 #     frames1, _, _ = load_video(video1_path)
@@ -544,6 +548,7 @@ def main():
     # Find the checkpoint with the smallest val_loss
     checkpoint_dir = 'checkpoints'
     checkpoint_files = os.listdir(checkpoint_dir)
+
     if args.ckpt is None:
         checkpoint_files = [file for file in checkpoint_files if file.startswith('model-') and file.endswith('.ckpt')]
         checkpoint_files.sort(key=lambda x: float(re.search(r'epoch=([0-9])', x).group(1)), reverse=True)
@@ -560,6 +565,7 @@ def main():
         else:
             model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
         model.eval()
+
 
     if torch.cuda.is_available():
         model = model.cuda()
