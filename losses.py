@@ -79,7 +79,7 @@ def pairwise_l2_distance(embs1, embs2):
     dist = torch.sum(diff ** 2, dim=2)
     return dist      # [N1, N2], every element is the squared L2 distance between a pair of embeddings
 
-def get_scaled_similarity(embs1, embs2, similarity_type, temperature):
+def get_scaled_similarity(embs1, embs2, similarity_type, temperature):       # return logits, need to be softmaxed
     channels = embs1.shape[1]       # featrue dimension
     if similarity_type == 'cosine':
         similarity = torch.mm(embs1, embs2.t())        # just like transformer attention

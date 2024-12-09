@@ -7,6 +7,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from dtw import dtw
 from torch.nn import functional as F
+import random
 from model import ModelWrapper
 from losses import get_scaled_similarity
 from train import PennAction, collate_fn
@@ -205,7 +206,7 @@ def euclidean_distance(x, y):
     y = y.cpu().numpy() if isinstance(y, torch.Tensor) else y
     return np.sqrt(np.sum((x - y) ** 2))
 
-def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False):
+def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False, temperature: float = 0.1, similarity_type: str = 'cosine'):
     """Align two videos using extracted features and save aligned result.
     
     Args:
@@ -280,55 +281,59 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             features2 = features2.cpu()
             # print('features1:', features1.shape)
             # print('features2:', features2.shape)
-            dist = get_scaled_similarity(features1, features2, 'l2', 0.1)      # [N1, N2]
-            self_dist1 = get_scaled_similarity(features1, features1, 'l2', 0.1)
-            self_dist2 = get_scaled_similarity(features2, features2, 'l2', 0.1)
+            sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature)      # [N1, N2]
+            sim12 = F.softmax(sim12, dim=1)
+            sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature)
+            sim11 = F.softmax(sim11, dim=1)
+            sim22 = get_scaled_similarity(features2, features2, similarity_type, temperature)
+            sim22 = F.softmax(sim22, dim=1)
 
-            softmaxed_dist = F.softmax(dist, dim=1)         # [N1, N2], alpha
-            nn_embs = torch.mm(softmaxed_dist, features2)          # [N1, D], tilda v_i
-            cycle_dist = get_scaled_similarity(nn_embs, features1, 'l2', 0.1)       # [N1, N1]
-            print('cycle_dist:', cycle_dist)
+            selected_features2 = torch.mm(sim12, features2)          # [N1, D], tilda v_i
+            cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature)       # [N1, N1]
+            cycle_sim11 = F.softmax(sim11, dim=1)
+            # print('cycle_dist:', cycle_dist)
 
             # Plot distance matrix as heatmap
             plt.figure(figsize=(10, 8))
-            plt.imshow(dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+            plt.imshow(sim12.numpy(), cmap='hot', interpolation='nearest')
             plt.colorbar()
-            plt.title('Distance HeatMap')
+            plt.title('Similarity HeatMap')
             plt.xlabel('Frames of Video {}'.format(i))
             plt.ylabel('Frames of Video {}'.format(i+1))
-            plt.savefig('result/distance_heatmap_{}and{}.png'.format(i, i+1))            
+            plt.savefig('result/similarity_heatmap_{}and{}.png'.format(i, i+1))            
             # plt.show()
 
             # Plot self distance matrix as heatmap
             plt.figure(figsize=(10, 8))
-            plt.imshow(self_dist1.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+            plt.imshow(sim11.numpy(), cmap='hot', interpolation='nearest', vmax=1)
             plt.colorbar()
-            plt.title('Self Distance HeatMap of Video {}'.format(i))
+            plt.title('Self Similarity HeatMap of Video {}'.format(i))
             plt.xlabel('Frames of Video {}'.format(i))
             plt.ylabel('Frames of Video {}'.format(i))
-            plt.savefig('result/self_distance_heatmap_{}.png'.format(i))
+            plt.savefig('result/self_similarity_heatmap_{}.png'.format(i))
             # plt.show()
 
             # Plot self distance matrix as heatmap
             plt.figure(figsize=(10, 8))
-            plt.imshow(self_dist2.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+            plt.imshow(sim22.numpy(), cmap='hot', interpolation='nearest', vmax=1)
             plt.colorbar()
-            plt.title('Self Distance HeatMap of Video {}'.format(i+1))
+            plt.title('Self Similarity HeatMap of Video {}'.format(i+1))
             plt.xlabel('Frames of Video {}'.format(i+1))
             plt.ylabel('Frames of Video {}'.format(i+1))
-            plt.savefig('result/self_distance_heatmap_{}.png'.format(i+1))
+            plt.savefig('result/self_similarity_heatmap_{}.png'.format(i+1))
             # plt.show()
 
             # Plot cycle distance matrix as heatmap
             plt.figure(figsize=(10, 8))
-            plt.imshow(cycle_dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+            plt.imshow(cycle_sim11.numpy(), cmap='hot', interpolation='nearest')
             plt.colorbar()
-            plt.title('Cycle Distance Heatmap of Video {} with {}'.format(i, i+1))
-            plt.xlabel('Selected Frames of Video {}'.format(i+1))
-            plt.ylabel('Frames of Original Video {}'.format(i))
-            plt.savefig('result/cycle_distance_heatmap_{}and{}.png'.format(i, i+1))
+            plt.title('Cycle Similarity HeatMap')
+            plt.xlabel('Frames of Video {}'.format(i))
+            plt.ylabel('Frames of Video {}'.format(i))
+            plt.savefig('result/cycle_similarity_heatmap_{}and{}.png'.format(i, i+1))
+            # plt.show()
 
-            matches = dist.argmin(1)
+            matches = sim12.argmax(dim=1)
             # print('matches:', matches)
             aligned_frames1, aligned_frames2 = get_aligned_frames(frames[0], frames[1], matches, downsample)
             # print('If downsample:', downsample)
@@ -375,12 +380,18 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
         features2 = features2.cpu()
 
         # Compute similarities between embs1 and embs2
-        dist = get_scaled_similarity(features1, features2, 'l2', 0.1)       # [N1/3, N2/3] or [N1, N2]
-        self_dist = get_scaled_similarity(features1, features1, 'l2', 0.1)
+        sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature)       # [N1/3, N2/3] or [N1, N2]
+        sim12 = F.softmax(sim12, dim=1)
+        sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature)
+        sim11 = F.softmax(sim11, dim=1)
+
+        selected_features2 = torch.mm(sim12, features2)          # [N1, D], tilda v_i
+        cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature)       # [N1, N1]
+        cycle_sim11 = F.softmax(cycle_sim11, dim=1)
 
         # Plot distance matrix as heatmap
         plt.figure(figsize=(10, 8))
-        plt.imshow(dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+        plt.imshow(sim12.numpy(), cmap='hot', interpolation='nearest')
         plt.colorbar()
         plt.title('Distance Heatmap')
         plt.xlabel('Frames of Video 2')
@@ -390,7 +401,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
 
         # Plot self distance matrix as heatmap
         plt.figure(figsize=(10, 8))
-        plt.imshow(self_dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+        plt.imshow(sim11.numpy(), cmap='hot', interpolation='nearest')
         plt.colorbar()
         plt.title('Self Distance Heatmap')
         plt.xlabel('Frames of Video 1')
@@ -398,13 +409,9 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
         plt.savefig(output_path[:-4] + '_self_distance_heatmap.png')
         # plt.show()
 
-        softmaxed_dist_12 = F.softmax(dist, dim=1)         # alpha
-        nn_embs = torch.mm(softmaxed_dist_12, features2)          # [N1, D], tilda v_i
-        cycle_dist = get_scaled_similarity(nn_embs, features1, 'l2', 0.1)       # [N1, N1]
-
         # Plot cycle distance matrix as heatmap
         plt.figure(figsize=(10, 8))
-        plt.imshow(cycle_dist.numpy(), cmap='hot', interpolation='nearest', vmax=1)
+        plt.imshow(cycle_sim11.numpy(), cmap='hot', interpolation='nearest')
         plt.colorbar()
         plt.title('Cycle Distance Heatmap')
         plt.xlabel('Frames of Video 1')
@@ -438,7 +445,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
                 for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
             ]
         else:
-            matches = dist.argmin(1)      # [N1/3] or [N1]
+            matches = sim12.argmax(1)      # [N1/3] or [N1]
             
             # Get aligned frames
             aligned_frames1, aligned_frames2 = get_aligned_frames(frames1, frames2, matches, downsample)
@@ -525,9 +532,15 @@ def main():
         parser.add_argument('--vidpath1', type=str, default='GolfDB/0.mp4', help='Path to the first video')
         parser.add_argument('--vidpath2', type=str, default='GolfDB/2.mp4', help='Path to the second video')
         parser.add_argument('--use_dtw', action='store_true', help='Use dynamic time warping for alignment')
+        parser.add_argument('--seed', type=int, default=42, help='Random seed')
+        parser.add_argument('--temperature', type=float, default=0.1, help='Temperature for softmax')
+        parser.add_argument('--similarity_type', type=str, default='l2', help='Type of similarity to use')
         return parser.parse_args()
 
     args = parse_args()
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
     
     # Load feature extraction model
     model = ModelWrapper() if args.downsample else ModelWrapper(dont_stack=not args.downsample)
@@ -573,7 +586,9 @@ def main():
         downsample=args.downsample, 
         dataset=args.dataset,
         valonval=args.valonval,
-        use_dtw=args.use_dtw
+        use_dtw=args.use_dtw,
+        temperature=args.temperature,
+        similarity_type=args.similarity_type
     )
 
     # # Check aligned frame
