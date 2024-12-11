@@ -30,10 +30,7 @@ class VideoDataset(Dataset):        # all the videos are trimmed to the shortest
             print(f"Processing video {i+1}/{len(video_files)}: {video_file.name}")
             self.frames.append(self.preprocess_video(video_file))
         # Find the shortest video length
-        shortest_video_length = min(frame.shape[0] for frame in self.frames)
-        
-        # Trim all videos to the shortest length, discarding time from the front
-        self.frames = [frame[-shortest_video_length:] for frame in self.frames]
+        self.shortest_sequence_length = min(frame.shape[0] for frame in self.frames)
 
         print("VideoDataset initialization complete!")
 
@@ -54,7 +51,16 @@ class VideoDataset(Dataset):        # all the videos are trimmed to the shortest
         return len(self.video_files)
         
     def __getitem__(self, idx):
-        return self.frames[idx]
+        sequence = self.frames[idx]
+
+        if len(sequence) > self.shortest_sequence_length:
+            sampled_indices = sorted(random.sample(range(len(sequence)), self.shortest_sequence_length))
+            sampled_sequence = torch.stack([sequence[i] for i in sampled_indices])
+        else:
+            sampled_indices = list(range(len(sequence)))
+            sampled_sequence = sequence
+        
+        return sampled_sequence, sampled_indices, len(sequence)   
 
 def collate_fn(batch):
     # Pad sequences to the same length
@@ -241,7 +247,7 @@ class LitModel(pl.LightningModule):
 def DBgolf():
     print("Starting training process...")
     print("Loading video files...")
-    video_dir = Path('./data/GolfDB')
+    video_dir = Path('../data/GolfDB')
     if video_dir.exists() and video_dir.is_dir():
         video_files = list(video_dir.glob('*.mp4')) + list(video_dir.glob('*.MP4'))
         if not video_files:
@@ -252,7 +258,6 @@ def DBgolf():
         print("Directory does not exist or is not a valid directory.")
     video_files = [file for file in video_files if int(str(file).split('/')[-1].split('.')[0]) % 2 == (0 if not args.use_120fps else 1)]
     video_files.sort(key=lambda x : int(str(x).split('/')[-1].split('.')[0]))
-    video_files = video_files[:10]
     print(video_files)
     print(f"Found {len(video_files)} video files")
     # Split into train/val sets
