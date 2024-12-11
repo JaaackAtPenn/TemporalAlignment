@@ -7,22 +7,22 @@ from losses import get_scaled_similarity
 import argparse
 from pathlib import Path
 from model import ModelWrapper
-from train import PennAction, collate_fn
+from train import PennAction, DBgolf, collate_fn
+from dataset import OurDataset, collate_fn_video, CombinedDataset
 import random
 import os
 import re
 
-def evaluate_kendalls_tau(loader, model, similarity_type='cosine', temperature=0.001):
+def evaluate_kendalls_tau(loader, model, similarity_type='cosine', temperature=0.001, dataset='all'):
     all_taus = []
 
     for batch_idx, batch in enumerate(loader):
         print(f"Processing batch {batch_idx + 1}/{len(loader)}...")
-        
-        frames, steps, seq_lens = batch
-        steps1 = steps[0].numpy()
-        # print('steps1:', steps1)
-        steps2 = steps[1].numpy()
-        # print('steps2:', steps2)
+        # TODO:
+        if dataset == 'PennAction':
+            frames, _, _ = batch
+        else:
+            frames = batch
 
         frames = frames.permute(0, 1, 3, 4, 2).contiguous()
         frames = frames.detach().cpu().numpy()
@@ -53,7 +53,7 @@ def main():
     def parse_args():
         parser = argparse.ArgumentParser(description="Align videos with optional downsampling.")
         parser.add_argument('--downsample', action='store_true', help='Use downsampling for feature extraction')
-        parser.add_argument('--dataset', type=str, default='PennAction', help='Dataset to use for alignment')
+        parser.add_argument('--dataset', type=str, default='all', help='Dataset to use for alignment')
         # parser.add_argument('--data_size', type=int, default=0, help='Number of videos to test, 0 for all')
         parser.add_argument('--ckpt', type=str, default=None, help='Checkpoint to load')
         parser.add_argument('--mac', action='store_true', help='Use mac to run the code')
@@ -64,6 +64,7 @@ def main():
         parser.add_argument('--seed', type=int, default=42, help='Random seed')
         parser.add_argument('--temperature', type=float, default=0.001, help='Temperature for softmax')
         parser.add_argument('--similarity_type', type=str, default='l2', help='Type of similarity to use')
+        parser.add_argument('--use_120fps', type=bool, default=True, help='Used for loading GolfDB: Whether to use 120fps videos')
         return parser.parse_args()
 
     args = parse_args()
@@ -99,10 +100,23 @@ def main():
     elif torch.backends.mps.is_available():
         model = model.to('mps')
 
-    if args.dataset == 'PennAction':
-        train_dataset, val_dataset = PennAction(data_size=10000000, dont_split=False)
+    if args.dataset == 'all':
+        penn_train, penn_val = PennAction(data_size=10000000, dont_split=False)
+        golf_train, golf_val = DBgolf(args)
+        our_train, our_val = OurDataset()
+
+        print("Combining datasets...")
+        train_dataset = CombinedDataset([penn_train, golf_train, our_train])
+        val_dataset = CombinedDataset([penn_val, golf_val, our_val])
     else:
-        raise NotImplementedError
+        if args.dataset == 'PennAction':
+            train_dataset, val_dataset = PennAction(data_size=10000000, dont_split=False)
+        elif args.dataset == 'GolfDB':
+            train_dataset, val_dataset = DBgolf(args)
+        elif args.dataset == 'ours':
+            train_dataset, val_dataset = OurDataset()
+        else:
+            raise NotImplementedError
     print('Dataset loaded')
     print('Number of frames of each video:', len(train_dataset[0][0]))
     print('Number of videos in train dataset:', len(train_dataset))
@@ -113,12 +127,22 @@ def main():
     else:
         dataset = train_dataset
 
-    loader = DataLoader(
-        dataset,
-        batch_size=2,
-        collate_fn=collate_fn,
-        drop_last=True,
-        shuffle=False)
+    if args.dataset == 'PennAction':
+        loader = DataLoader(
+            dataset,
+            batch_size=2,
+            collate_fn=collate_fn,
+            drop_last=True,
+            shuffle=False)
+    elif args.dataset == 'GolfDB' or args.dataset == 'ours' or args.dataset == 'all' :
+        loader = DataLoader(
+            dataset,
+            batch_size=2,
+            collate_fn=collate_fn_video,
+            drop_last=True,
+            shuffle=False)
+    else:
+        raise NotImplementedError
 
     # Evaluate Kendall's Tau
     print("Evaluating Kendall's Tau...")
@@ -126,7 +150,8 @@ def main():
         loader=loader,
         model=model,
         similarity_type=args.similarity_type,
-        temperature=args.temperature
+        temperature=args.temperature,
+        dataset=args.dataset
     )
     print(f"Final Average Kendall's Tau: {avg_tau:.4f}")
 
