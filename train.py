@@ -174,10 +174,22 @@ class FrameSequenceDataset(Dataset):
         return sorted(filtered_folders, key=lambda x: int(x.name))
     
 class LitModel(pl.LightningModule):
-    def __init__(self, model=None, loss_type='regression_mse_var', similarity_type='l2', temperature=0.1, variance_lambda=0.001, use_random_window=False, use_align_alpha=False, align_alpha_strength=0.1, do_not_reduce_frame_rate=False, small_embedder=False, dont_stack=False):
+    def __init__(self, model=None, 
+                 loss_type='regression_mse_var', 
+                 similarity_type='l2', 
+                 temperature=0.1, 
+                 variance_lambda=0.001, 
+                 use_random_window=False, 
+                 use_align_alpha=False, 
+                 align_alpha_strength=0.1, 
+                 do_not_reduce_frame_rate=False, 
+                 small_embedder=False, 
+                 dont_stack=False, 
+                 front_temp_emb=False, 
+                 back_temp_emb=False):
         super().__init__()
         print("Initializing LitModel...")
-        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate, small_embedder=small_embedder, dont_stack=dont_stack)
+        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate, small_embedder=small_embedder, dont_stack=dont_stack, front_temporal_emb=front_temp_emb, back_temporal_emb=back_temp_emb)
         self.loss_type = loss_type
         self.similarity_type = similarity_type
         self.temperature = temperature
@@ -374,8 +386,27 @@ def train(args):
         persistent_workers=True
     )
     
+    front_temp_emb = False
+    back_temp_emb = False
+    if args.use_temporal_embedding:
+        if args.temporal_embedding_location == 'both' or args.temporal_embedding_location == 'front':
+            front_temp_emb = True
+        if args.temporal_embedding_location == 'both' or args.temporal_embedding_location == 'back':
+            back_temp_emb = True
+
     print("Initializing model...")
-    model = LitModel(loss_type=args.loss_type, similarity_type=args.similarity_type, temperature=args.temperature, variance_lambda=args.variance_lambda, use_random_window=args.use_random_window, use_align_alpha=args.use_align_alpha, align_alpha_strength=args.align_alpha_strength, do_not_reduce_frame_rate=args.do_not_reduce_frame_rate, small_embedder=args.small_embedder, dont_stack=args.dont_stack)
+    model = LitModel(loss_type=args.loss_type, 
+                     similarity_type=args.similarity_type, 
+                     temperature=args.temperature, 
+                     variance_lambda=args.variance_lambda, 
+                     use_random_window=args.use_random_window, 
+                     use_align_alpha=args.use_align_alpha, 
+                     align_alpha_strength=args.align_alpha_strength, 
+                     do_not_reduce_frame_rate=args.do_not_reduce_frame_rate, 
+                     small_embedder=args.small_embedder, 
+                     dont_stack=args.dont_stack,
+                     front_temp_emb=front_temp_emb,
+                     back_temp_emb=back_temp_emb)
 
     base_model_stats = count_model_parameters(model.model.cnn, "BaseModel")
     conv_embedder_stats = count_model_parameters(model.model.emb, "ConvEmbedder")
@@ -441,6 +472,8 @@ if __name__ == "__main__":
         parser.add_argument('--use_random_window', action='store_true', help='Whether to use random window cropping')
         parser.add_argument('--use_align_alpha', action='store_true', help='Whether to use alignment alpha')
         parser.add_argument('--align_alpha_strength', type=float, default=0.1, help='Strength of alignment alpha')
+        parser.add_argument('--use_temporal_embedding', action='store_true', help='Whether to use temporal embedding')
+        parser.add_argument('--temporal_embedding_location', type=str, default='both', choices=['front', 'back', 'both'], help='Whether to use temporal embedding')
         parser.add_argument('--do_not_reduce_frame_rate', action='store_true', help='Whether to reduce frame rate to 10fps')
         parser.add_argument('--use_120fps', action='store_true', help='Whether to use 120fps videos')
         parser.add_argument('--dataset', type=str, default='PennAction', choices=['GolfDB', 'PennAction'], help='Dataset to use for training')

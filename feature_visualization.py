@@ -51,7 +51,7 @@ def extract_cnn_features(frames: np.ndarray, model: ModelWrapper) -> torch.Tenso
     
     return features
 
-def visualize(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False, temperature: float = 0.1, similarity_type: str = 'cosine', ckpt_name=''):
+def visualize(video1_path: str, video2_path: str, model: ModelWrapper, dataset: str = 'PennAction', valonval: bool = False, ckpt_name=''):
     """Align two videos using extracted features and save aligned result.
     
     Args:
@@ -328,10 +328,11 @@ def main():
         # parser.add_argument('--data_size', type=int, default=0, help='Number of videos to test, 0 for all')
         parser.add_argument('--ckpt', type=str, default=None, help='Checkpoint to load')
         parser.add_argument('--mac', action='store_true', help='Use mac to run the code')
+        parser.add_argument('--use_temporal_embedding', action='store_true', help='Whether to use temporal embedding')
+        parser.add_argument('--temporal_embedding_location', type=str, default='both', choices=['front', 'back', 'both'], help='Whether to use temporal embedding')
         parser.add_argument('--valonval', action='store_true', help='Validate on validation set')
         parser.add_argument('--vidpath1', type=str, default='GolfDB/0.mp4', help='Path to the first video')
         parser.add_argument('--vidpath2', type=str, default='GolfDB/2.mp4', help='Path to the second video')
-        parser.add_argument('--use_dtw', action='store_true', help='Use dynamic time warping for alignment')
         parser.add_argument('--seed', type=int, default=42, help='Random seed')
         parser.add_argument('--temperature', type=float, default=0.1, help='Temperature for softmax')
         parser.add_argument('--similarity_type', type=str, default='l2', help='Type of similarity to use')
@@ -341,9 +342,17 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
+
+    front_temp_emb = False
+    back_temp_emb = False
+    if args.use_temporal_embedding:
+        if args.temporal_embedding_location == 'both' or args.temporal_embedding_location == 'front':
+            front_temp_emb = True
+        if args.temporal_embedding_location == 'both' or args.temporal_embedding_location == 'back':
+            back_temp_emb = True
     
     # Load feature extraction model
-    model = ModelWrapper() if args.downsample else ModelWrapper(dont_stack=not args.downsample)
+    model = ModelWrapper(front_temporal_emb=front_temp_emb, back_temporal_emb=back_temp_emb) if args.downsample else ModelWrapper(dont_stack=not args.downsample, front_temporal_emb=front_temp_emb, back_temporal_emb=back_temp_emb)
 
     # Find the checkpoint with the smallest val_loss
     checkpoint_dir = 'checkpoints'
@@ -376,19 +385,15 @@ def main():
     video_dir = '../data/'
     video1_path = video_dir + args.vidpath1
     video2_path = video_dir + args.vidpath2
-    output_path = args.vidpath1.split('/')[1][:-4] + '&' + args.vidpath2.split('/')[1][:-4] + 'withDTW' + str(args.use_dtw) + '.mp4'
-    output_path = 'result/' + output_path
+    if not os.path.exists('feature_visualization/' + ckpt_name):
+        os.mkdir('feature_visualization/' + ckpt_name)
+        
     visualize(
         video1_path=video1_path,
         video2_path=video2_path,
         model=model,
-        output_path=output_path,
-        downsample=args.downsample, 
         dataset=args.dataset,
         valonval=args.valonval,
-        use_dtw=args.use_dtw,
-        temperature=args.temperature,
-        similarity_type=args.similarity_type,
         ckpt_name=ckpt_name
     )
 

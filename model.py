@@ -7,16 +7,20 @@ from torchvision.models import ResNet50_Weights
 
 
 class ConvEmbedder(nn.Module):
-    def __init__(self, embedding_dim=128, fc_dropout_rate=0.1, dont_stack=False, small_embedder=False):
+    def __init__(self, embedding_dim=128, fc_dropout_rate=0.1, dont_stack=False, small_embedder=False, front_temporal_embedding=False, back_temporal_embedding=False):
         super(ConvEmbedder, self).__init__()
-        
+        self.front_temporal_emb = front_temporal_embedding
+        self.back_temporal_emb = back_temporal_embedding
         # Configurations
         self.embedding_dim = embedding_dim
         channels = 256 if small_embedder else 512
 
+        self.temporal_emb_dim = 6
+        in_channel = 1024 + self.temporal_emb_dim if front_temporal_embedding else 1024
+
         self.conv_layers = nn.Sequential(
             #TODO: Check kernel and padding
-            nn.Conv3d(in_channels=1024, out_channels=channels, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
+            nn.Conv3d(in_channels=in_channel, out_channels=channels, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
             nn.BatchNorm3d(channels),
             nn.ReLU(inplace=True),
             nn.Conv3d(in_channels=channels, out_channels=channels, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
@@ -27,7 +31,10 @@ class ConvEmbedder(nn.Module):
         # Pooling Layer
         self.global_pooling = nn.AdaptiveAvgPool3d((1, 1, 1)) if not dont_stack else nn.AdaptiveAvgPool2d((1, 1))
         self.dont_stack = dont_stack 
-        
+
+        if self.back_temporal_emb:
+            channels += self.temporal_emb_dim
+
         # Fully Connected Layers
         self.fc1 = nn.Linear(channels, channels)
         self.fc2 = nn.Linear(channels, channels)
@@ -39,6 +46,16 @@ class ConvEmbedder(nn.Module):
         # Reshape to (batch_size, feature_channels, num_steps, height, width) for 3D Conv
         x = x.permute(0, 2, 1, 3, 4)
 
+        B, C, S, H, W = x.shape
+
+        # Positional Embedding
+        if self.front_temporal_emb:
+            pos_embedding = torch.arange(0,1,S).to(x.device)
+            # pos_embedding = pos_embedding + torch.randn_like(pos_embedding) * (1/S)
+            # pos_embedding = torch.round(pos_embedding * 10) / 10
+            pos_embedding = pos_embedding.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand(B, self.temporal_emb_dim, S, H, W)
+            x = torch.cat((x, pos_embedding), dim=1)
+
         # Apply 3D Convolutions
         x = self.conv_layers(x)
         
@@ -48,9 +65,17 @@ class ConvEmbedder(nn.Module):
             x = x.permute(0, 2, 1, 3, 4)
             steps = x.shape[1]
             batch_size = x.shape[0]
+            if self.back_temporal_emb:
+                pos_embedding = torch.arange(0,1,S).to(x.device)
+                # pos_embedding = pos_embedding + torch.randn_like(pos_embedding) * (1/S)
+                # pos_embedding = torch.round(pos_embedding * 10) / 10
+                pos_embedding = pos_embedding.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, S, self.temporal_emb_dim, 1, 1)
+                x = torch.cat((x, pos_embedding), dim=2)
             x = x.contiguous().view(batch_size * steps, -1)       # Reshape to (batch_size * steps, channels), all frames are kept
         else:
             x = x.view(x.size(0), -1)
+
+       
         
         # Fully Connected Layers
         x = self.fc_dropout(x)
@@ -111,11 +136,11 @@ class BaseModel(nn.Module):
         return features
     
 class ModelWrapper(nn.Module):
-    def __init__(self, do_not_reduce_frame_rate=False, dont_stack=False, small_embedder=False):
+    def __init__(self, do_not_reduce_frame_rate=False, dont_stack=False, small_embedder=False, front_temporal_emb=False, back_temporal_emb=False):
         super(ModelWrapper, self).__init__()
 
         self.cnn = BaseModel()
-        self.emb = ConvEmbedder(dont_stack=dont_stack, small_embedder=small_embedder)
+        self.emb = ConvEmbedder(dont_stack=dont_stack, small_embedder=small_embedder, front_temporal_embedding=front_temporal_emb, back_temporal_embedding=back_temporal_emb)
         self.do_not_reduce_frame_rate = do_not_reduce_frame_rate
         self.dont_stack = dont_stack
 
