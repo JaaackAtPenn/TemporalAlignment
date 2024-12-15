@@ -15,11 +15,11 @@ def classification_loss(logits, labels, label_smoothing):
 
     return loss, 0.0
 
-def regression_loss(logits, labels, alpha, num_steps, steps, seq_lens, steps_j, seq_lens_j,
+def regression_loss(softmaxed_logits, labels, alpha, num_steps, steps, seq_lens, steps_j, seq_lens_j,
                     loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, window_size, use_align_alpha, align_alpha_strength):
     # Detach labels and steps to stop gradients
     labels = labels.detach()
-    steps = steps.detach()
+    steps = steps.detach()            # [N(N-1)*T, T]
     steps_j = steps_j.detach()
 
     # Normalize indices if required
@@ -31,7 +31,8 @@ def regression_loss(logits, labels, alpha, num_steps, steps, seq_lens, steps_j, 
         steps = steps.float()
 
     # Compute softmax over logits to get probabilities (beta)
-    beta = F.softmax(logits, dim=1)       # [N(N-1)*T, T]
+    # beta = F.softmax(logits, dim=1)       # [N(N-1)*T, T]
+    beta = softmaxed_logits
 
     # Compute true_time and pred_time, in terms of time sequence, not the sampled steps
     true_time = torch.sum(steps * labels, dim=1)      # [N(N-1)*T]
@@ -49,7 +50,7 @@ def regression_loss(logits, labels, alpha, num_steps, steps, seq_lens, steps_j, 
     if loss_type in ['regression_mse', 'regression_mse_var']:
         if 'var' in loss_type:
             # Variance-aware regression
-            pred_time_tiled = pred_time.unsqueeze(1).repeat(1, num_steps)
+            pred_time_tiled = pred_time.unsqueeze(1).repeat(1, num_steps)           # [N(N-1)*T, T]
             pred_time_variance = torch.sum((steps - pred_time_tiled) ** 2 * beta, dim=1)
 
             # Use log of variance for numerical stability
@@ -79,8 +80,54 @@ def pairwise_l2_distance(embs1, embs2):
     dist = torch.sum(diff ** 2, dim=2)
     return dist      # [N1, N2], every element is the squared L2 distance between a pair of embeddings
 
-def get_scaled_similarity(embs1, embs2, similarity_type, temperature):       # return logits, need to be softmaxed
+def sample_center(projected_i, window_size, N2):
+    start = max(0, projected_i - window_size // 2)
+    end = min(N2, projected_i + window_size // 2 + 1)
+    window_range = torch.arange(start, end)
+    mean = projected_i
+    std = window_size / 4  
+    probabilities = torch.exp(-0.5 * ((window_range - mean) / std) ** 2)
+    probabilities /= probabilities.sum()  
+    sampled_index = torch.multinomial(probabilities, num_samples=1).item()
+    return window_range[sampled_index]
+
+def get_scaled_similarity(embs1, embs2, similarity_type, temperature, use_random_window=False, use_center_window=False, window_size=0):       # return logits, need to be softmaxed
+    ''' NOTE: In order to apply window, it's better to return softmaxed similarity, not logits. '''
+
     channels = embs1.shape[1]       # featrue dimension
+    N1 = embs1.shape[0]
+    N2 = embs2.shape[0]
+    
+    # if use_random_window or use_center_window:
+    #     selected_indices = torch.zeros((N1, window_size), device=embs1.device)
+    #     for i in range(N1):
+    #         projected_i = int(i * N2 / N1)
+    #         if use_random_window:
+    #             center = torch.randint(low=projected_i - window_size // 2, high=projected_i + window_size // 2 + 1, size=(1,))
+    #         elif use_center_window:
+    #             center = projected_i
+    #         start_index = max(0, center - window_size // 2)
+    #         end_index = min(N2, center + window_size // 2)
+    #         if end_index - start_index < window_size:
+    #             if start_index == 0:
+    #                 end_index = window_size
+    #             elif end_index == N2:
+    #                 start_index = N2 - window_size
+    #         selected_indices[i] = torch.arange(start_index, end_index, device=embs1.device)
+
+    #     windowed_embs2 = torch.tensor([embs2[indices] for indices in selected_indices], device=embs1.device)       # [N1, window_size, D]
+
+    #     if similarity_type == 'cosine':
+    #         similarity = torch.bmm(embs1.unsqueeze(1), windowed_embs2.permute(0, 2, 1)).squeeze(1)        # [N1, window_size]
+    #     elif similarity_type == 'l2':
+    #         diff = embs1.unsqueeze(1) - windowed_embs2
+    #         similarity = -torch.sum(diff ** 2, dim=2)  # [N1, window_size]
+
+    #     similarity = similarity / channels
+    #     similarity = similarity / temperature
+
+    #     return similarity, selected_indices, windowed_embs2         # similarity: [N1, window_size]; selected_indices: [N1, window_size]; windowed_embs2: [N1, window_size, D]
+
     if similarity_type == 'cosine':
         similarity = torch.mm(embs1, embs2.t())        # just like transformer attention
     elif similarity_type == 'l2':
@@ -93,26 +140,65 @@ def get_scaled_similarity(embs1, embs2, similarity_type, temperature):       # r
     # Scale by temperature
     similarity = similarity / temperature
 
+    similarity = F.softmax(similarity, dim=1)         # [N1, N2]
+
+    if use_random_window or use_center_window:
+        selected_indices_mask = torch.zeros((N1, N2), device=embs1.device)
+        for i in range(N1):
+            projected_i = int(i * N2 / N1)
+            if use_random_window:
+                # center = torch.randint(low=projected_i - window_size // 2, high=projected_i + window_size // 2 + 1, size=(1,))
+                center = sample_center(projected_i, window_size, N2)
+            elif use_center_window:
+                center = projected_i
+            start_index = max(0, center - window_size // 2)
+            end_index = min(N2, center + window_size // 2)
+            if end_index - start_index < window_size:
+                if start_index == 0:
+                    end_index = window_size
+                elif end_index == N2:
+                    start_index = N2 - window_size
+            selected_indices_mask[i, start_index:end_index] = 1
+
+        similarity = similarity * selected_indices_mask
+        similarity = similarity / torch.sum(similarity, dim=1, keepdim=True)       # normalize the selected similarity
+
     return similarity       # [N1, N2], every element is the similarity between a pair of embeddings
 
-def align_pair_of_sequences(embs1, embs2, similarity_type, temperature):     # embs1 is U, embs2 is V
+def align_pair_of_sequences(embs1, embs2, similarity_type, temperature, use_random_window=False, use_center_window=False, window_size=0):     # embs1 is U, embs2 is V
     max_num_steps = embs1.shape[0]        # embs1 and embs2 have the same number of steps, N1 = N2
 
+    # if use_random_window or use_center_window:
+    #     sim12, _, windowed_embds2 = get_scaled_similarity(embs1, embs2, similarity_type, temperature, use_random_window, use_center_window, window_size)       # sim12:[N1, window_size], selected_indices: [N1, window_size]; windowed_embds2: [N1, window_size, D]
+    #     softmaxed_sim12 = F.softmax(sim12, dim=1)         # alpha
+    #     alpha = softmaxed_sim12         # [N1, window_size]
+
+    #     # Compute soft-nearest neighbors
+    #     nn_embds = torch.bmm(softmaxed_sim12.unsqueeze(1), windowed_embds2).squeeze(1)          # [N1, D], tilda v_i
+
+    #     # Compute similarities between nn_embds and embs1
+    #     sim21, selected_indices, _ = get_scaled_similarity(nn_embds, embs1, similarity_type, temperature)        # sim21: [N1, N1], selected_indices: [N1, N1]; windowed_embds1: [N1, N1, D]
+
+    #     logits = sim21
+    #     labels = F.one_hot(torch.arange(max_num_steps), num_classes=max_num_steps).float().to(embs1.device)       # [N1, N1], identity matrix
+
+    #     return logits, labels, alpha, selected_indices       # logits before softmax, labels are one-hot
+
     # Compute similarities between embs1 and embs2
-    sim_12 = get_scaled_similarity(embs1, embs2, similarity_type, temperature)       # [N1, N2]
-    softmaxed_sim_12 = F.softmax(sim_12, dim=1)         # alpha
+    softmaxed_sim_12 = get_scaled_similarity(embs1, embs2, similarity_type, temperature, use_random_window, use_center_window, window_size)       # [N1, N2]
+    # softmaxed_sim_12 = F.softmax(sim_12, dim=1)         # alpha
     alpha = softmaxed_sim_12         # [N1, N2]
 
     # Compute soft-nearest neighbors
     nn_embs = torch.mm(softmaxed_sim_12, embs2)          # [N1, D], tilda v_i
 
     # Compute similarities between nn_embs and embs1
-    sim_21 = get_scaled_similarity(nn_embs, embs1, similarity_type, temperature)        # [N1, N1], beta before softmax
+    softmaxed_sim_21 = get_scaled_similarity(nn_embs, embs1, similarity_type, temperature, use_random_window, use_center_window, window_size)        # [N1, N1], beta before softmax
 
-    logits = sim_21
+    # logits = sim_21
     labels = F.one_hot(torch.arange(max_num_steps), num_classes=max_num_steps).float().to(embs1.device)       # [N1, N1], identity matrix
 
-    return logits, labels, alpha       # logits before softmax, labels are one-hot
+    return softmaxed_sim_21, labels, alpha       # logits before softmax, labels are one-hot
 
 def compute_deterministic_alignment_loss(embs,
                                          steps,
@@ -127,30 +213,52 @@ def compute_deterministic_alignment_loss(embs,
                                          huber_delta,
                                          normalize_indices,
                                          use_random_window,
+                                         use_center_window,
                                          window_size,
                                          use_align_alpha,
                                          align_alpha_strength):
     
     labels_list = []
-    logits_list = []
+    softmaxed_logits_list = []
     steps_list = []        # steps of u
     seq_lens_list = []       # sequence lengths of u
     steps_j_list = []       # steps of v
     seq_lens_j_list = []       # sequence lengths of v
     alpha_list = []
+    # selected_indices_list = []
 
-
+    # if use_random_window or use_center_window:
+    #     for i in range(batch_size):
+    #         for j in range(batch_size):
+    #             if i != j:
+    #                 softmaxed_logits, labels, alpha, selected_indices = align_pair_of_sequences(
+    #                     embs[i],
+    #                     embs[j],
+    #                     similarity_type,
+    #                     temperature,
+    #                     use_random_window,
+    #                     use_center_window,
+    #                     window_size
+    #                 )
+    #                 softmaxed_logits_list.append(softmaxed_logits)
+    #                 labels_list.append(labels)
+    #                 alpha_list.append(alpha)
+    #                 selected_indices
+    # else:
     for i in range(batch_size):
         for j in range(batch_size):
             # Do not align the sequence with itself
             if i != j:
-                logits, labels, alpha = align_pair_of_sequences(          # logits is beta before softmax
+                softmaxed_logits, labels, alpha = align_pair_of_sequences(          # logits is beta before softmax
                     embs[i],
                     embs[j],
                     similarity_type,
-                    temperature
+                    temperature,
+                    use_random_window,
+                    use_center_window,
+                    window_size
                 )
-                logits_list.append(logits)       # [T, T]
+                softmaxed_logits_list.append(softmaxed_logits)       # [T, T]
                 labels_list.append(labels)       # [T, T]
                 alpha_list.append(alpha)        # [T, T]
                 steps_i = steps[i].unsqueeze(0).repeat(num_steps, 1)        # [T, T], every row is the same, representing the step indices of ui
@@ -162,24 +270,24 @@ def compute_deterministic_alignment_loss(embs,
                 seq_lens_j = seq_lens[j].unsqueeze(0).repeat(num_steps)        # [T], every element is the same, representing the sequence length of vj
                 seq_lens_j_list.append(seq_lens_j)
 
-    logits = torch.cat(logits_list, dim=0)          # [N(N-1)*T, T], N is the batch size
-    labels = torch.cat(labels_list, dim=0)          # [N(N-1)*T, T]
-    alpha = torch.cat(alpha_list, dim=0)          # [N(N-1)*T, T]
-    steps = torch.cat(steps_list, dim=0)           # [N(N-1)*T, T]
-    seq_lens = torch.cat(seq_lens_list, dim=0)      # [N(N-1)*T]
-    steps_j = torch.cat(steps_j_list, dim=0)           # [N(N-1)*T, T]
-    seq_lens_j = torch.cat(seq_lens_j_list, dim=0)      # [N(N-1)*T]
+        softmaxed_logits = torch.cat(softmaxed_logits_list, dim=0)          # [N(N-1)*T, T], N is the batch size
+        labels = torch.cat(labels_list, dim=0)          # [N(N-1)*T, T]
+        alpha = torch.cat(alpha_list, dim=0)          # [N(N-1)*T, T]
+        steps = torch.cat(steps_list, dim=0)           # [N(N-1)*T, T]
+        seq_lens = torch.cat(seq_lens_list, dim=0)      # [N(N-1)*T]
+        steps_j = torch.cat(steps_j_list, dim=0)           # [N(N-1)*T, T]
+        seq_lens_j = torch.cat(seq_lens_j_list, dim=0)      # [N(N-1)*T]
 
-    if loss_type == 'classification':
-        loss, align_alpha_loss = classification_loss(logits, labels, label_smoothing)
-    elif 'regression' in loss_type:
-        loss, align_alpha_loss = regression_loss(
-            logits, labels, alpha, num_steps, steps, seq_lens, steps_j, seq_lens_j,
-            loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, window_size, use_align_alpha, align_alpha_strength
-        )
-    else:
-        raise ValueError(f"Unidentified loss_type {loss_type}. Currently supported loss "
-                         "types are: regression_mse, regression_huber, classification.")
+        if loss_type == 'classification':
+            loss, align_alpha_loss = classification_loss(softmaxed_logits, labels, label_smoothing)
+        elif 'regression' in loss_type:
+            loss, align_alpha_loss = regression_loss(
+                softmaxed_logits, labels, alpha, num_steps, steps, seq_lens, steps_j, seq_lens_j,
+                loss_type, normalize_indices, variance_lambda, huber_delta, use_random_window, window_size, use_align_alpha, align_alpha_strength
+            )
+        else:
+            raise ValueError(f"Unidentified loss_type {loss_type}. Currently supported loss "
+                            "types are: regression_mse, regression_huber, classification.")
 
     return loss, align_alpha_loss
 
@@ -323,6 +431,7 @@ def compute_alignment_loss(embs,          # [B, T, D]
                            huber_delta=0.1,        
                            normalize_indices=True,
                            use_random_window=False,
+                           use_center_window=False,
                            window_size=5,
                            use_align_alpha=False,
                            align_alpha_strength=0.1):
@@ -372,6 +481,7 @@ def compute_alignment_loss(embs,          # [B, T, D]
             huber_delta=huber_delta,
             normalize_indices=normalize_indices,
             use_random_window=use_random_window,
+            use_center_window=use_center_window,
             window_size=window_size,
             use_align_alpha=use_align_alpha,
             align_alpha_strength=align_alpha_strength)
@@ -390,6 +500,7 @@ def compute_alignment_loss(embs,          # [B, T, D]
             huber_delta=huber_delta,
             normalize_indices=normalize_indices,
             use_random_window=use_random_window,
+            use_center_window=use_center_window,
             window_size=window_size,
             use_align_alpha=use_align_alpha,
             align_alpha_strength=align_alpha_strength)

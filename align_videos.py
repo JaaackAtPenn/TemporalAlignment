@@ -206,7 +206,7 @@ def euclidean_distance(x, y):
     y = y.cpu().numpy() if isinstance(y, torch.Tensor) else y
     return np.sqrt(np.sum((x - y) ** 2))
 
-def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False, temperature: float = 0.1, similarity_type: str = 'cosine'):
+def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False, temperature: float = 0.1, similarity_type: str = 'cosine', use_random_window: bool = False, use_center_window: bool = False, window_size: int = 5):
     """Align two videos using extracted features and save aligned result.
     
     Args:
@@ -281,16 +281,16 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             features2 = features2.cpu()
             # print('features1:', features1.shape)
             # print('features2:', features2.shape)
-            sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature)      # [N1, N2]
-            sim12 = F.softmax(sim12, dim=1)
-            sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature)
-            sim11 = F.softmax(sim11, dim=1)
-            sim22 = get_scaled_similarity(features2, features2, similarity_type, temperature)
-            sim22 = F.softmax(sim22, dim=1)
+            sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)      # [N1, N2]
+            # sim12 = F.softmax(sim12, dim=1)
+            sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)
+            # sim11 = F.softmax(sim11, dim=1)
+            sim22 = get_scaled_similarity(features2, features2, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)
+            # sim22 = F.softmax(sim22, dim=1)
 
             selected_features2 = torch.mm(sim12, features2)          # [N1, D], tilda v_i
-            cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature)       # [N1, N1]
-            cycle_sim11 = F.softmax(sim11, dim=1)
+            cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)       # [N1, N1]
+            # cycle_sim11 = F.softmax(sim11, dim=1)
             # print('cycle_dist:', cycle_dist)
 
             # Plot distance matrix as heatmap
@@ -380,14 +380,15 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
         features2 = features2.cpu()
 
         # Compute similarities between embs1 and embs2
-        sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature)       # [N1/3, N2/3] or [N1, N2]
-        sim12 = F.softmax(sim12, dim=1)
-        sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature)
-        sim11 = F.softmax(sim11, dim=1)
+        sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)       # [N1/3, N2/3] or [N1, N2]
+        # print('sim12:', sim12)
+        # sim12 = F.softmax(sim12, dim=1)
+        sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)
+        # sim11 = F.softmax(sim11, dim=1)
 
         selected_features2 = torch.mm(sim12, features2)          # [N1, D], tilda v_i
-        cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature)       # [N1, N1]
-        cycle_sim11 = F.softmax(cycle_sim11, dim=1)
+        cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)       # [N1, N1]
+        # cycle_sim11 = F.softmax(cycle_sim11, dim=1)
 
         # Plot distance matrix as heatmap
         plt.figure(figsize=(10, 8))
@@ -535,6 +536,9 @@ def main():
         parser.add_argument('--seed', type=int, default=42, help='Random seed')
         parser.add_argument('--temperature', type=float, default=0.1, help='Temperature for softmax')
         parser.add_argument('--similarity_type', type=str, default='l2', help='Type of similarity to use')
+        parser.add_argument('--use_random_window', action='store_true', help='Use random window for alignment')
+        parser.add_argument('--use_center_window', action='store_true', help='Use center window for alignment')
+        parser.add_argument('--window_size', type=int, default=5, help='Window size for alignment')
         return parser.parse_args()
 
     args = parse_args()
@@ -588,7 +592,10 @@ def main():
         valonval=args.valonval,
         use_dtw=args.use_dtw,
         temperature=args.temperature,
-        similarity_type=args.similarity_type
+        similarity_type=args.similarity_type,
+        use_random_window=args.use_random_window,
+        use_center_window=args.use_center_window,
+        window_size=args.window_size
     )
 
     # # Check aligned frame
