@@ -444,7 +444,7 @@ def train(args):
     
     print("Initializing trainer...")
     trainer = pl.Trainer(
-        max_epochs=500,
+        max_epochs=300,
         callbacks=[checkpoint_callback],
         logger=logger,
         accelerator='gpu'

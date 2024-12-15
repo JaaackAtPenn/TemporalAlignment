@@ -63,20 +63,13 @@ def visualize(video1_path: str, video2_path: str, model: ModelWrapper, dataset: 
     batch_size=4
     # Load videos
     if dataset == 'PennAction':
-        train_dataset, val_dataset = PennAction(data_size=10000000, dont_split=False)
+        train_dataset = PennAction(data_size=10000000, dont_split=True)
         print('Dataset loaded')
         print('Number of frames of each video:', len(train_dataset[0][0]))
         print('Number of videos in train dataset:', len(train_dataset))
-        print('Number of videos in val dataset:', len(val_dataset))
         trainloader = DataLoader(
             train_dataset, 
             batch_size=batch_size, 
-            collate_fn=collate_fn,
-            drop_last=True,
-            shuffle=False)
-        valloader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
             collate_fn=collate_fn,
             drop_last=True,
             shuffle=False)
@@ -84,12 +77,12 @@ def visualize(video1_path: str, video2_path: str, model: ModelWrapper, dataset: 
         if valonval:
             i += len(train_dataset)
         end = i + 8
-        if valonval:
-            loader = valloader
-        else:
-            loader = trainloader
-        for batch in loader:
-            frames, steps, seq_lens = batch
+        loader = trainloader
+        indicies = [34,145,156,19,70,91,22,124,20,59]
+        for idx in range(0,len(indicies),batch_size):
+            batch = [loader.dataset[indicies[idx + b]] for b in range(batch_size)]  # Access the dataset directly using the index
+            frames = torch.stack([batch[b][0] for b in range(batch_size)])
+            
             frames = frames.permute(0, 1, 3, 4, 2).contiguous()
             frames = frames.detach().cpu().numpy()
             frames = (frames * 255).astype('uint8')
@@ -129,26 +122,26 @@ def visualize(video1_path: str, video2_path: str, model: ModelWrapper, dataset: 
                 plt.savefig(f'feature_visualization/{ckpt_name}/umap_pennaction_{batch_size}_from_{i}.png')
             i += batch_size
 
-            combined_cnn_features = combined_cnn_features.permute(0, 2, 3, 1) # reorder axis
-            inp = combined_cnn_features.reshape(-1, 1024) # flatten
-            for k in range(10,100,10):
-                eigvectors, eigvalues = NCUT(num_eig=k, device='cuda:0').fit_transform(inp)
-                tsne_x3d, tsne_rgb = rgb_from_tsne_3d(eigvectors, device='cuda:0')
-                tsne_rgb = tsne_rgb.reshape(-1, 14, 14, 3) # (B, H, W, 3)
+            # combined_cnn_features = combined_cnn_features.permute(0, 2, 3, 1) # reorder axis
+            # inp = combined_cnn_features.reshape(-1, 1024) # flatten
+            # for k in range(10,100,10):
+            #     eigvectors, eigvalues = NCUT(num_eig=k, device='cuda:0').fit_transform(inp)
+            #     tsne_x3d, tsne_rgb = rgb_from_tsne_3d(eigvectors, device='cuda:0')
+            #     tsne_rgb = tsne_rgb.reshape(-1, 14, 14, 3) # (B, H, W, 3)
 
-                # Save RGB t-SNE images in a big image, 5x5
-                big_image = np.zeros((4 * 14 + 3 * 1, 10 * 14 + 9 * 1, 3), dtype=np.uint8)  # Adjusted for 10 columns with spaces between images
-                for r in range(4):
-                    for c in range(10):
-                        index = r * 38 + c * 3
-                        if index < len(tsne_rgb):
-                            big_image[(r * 14) + r:(r + 1) * 14 + r, (c * 14) + c:(c + 1) * 14 + c, :] = tsne_rgb[index] * 255.0  # Adjusted indices to include spaces
-                plt.clf()
-                plt.figure(figsize=(8, 4))
-                plt.imshow(big_image)
-                plt.title('ResNet Feature')
-                plt.axis('off')
-                plt.savefig(f'feature_visualization/{ckpt_name}/tsne_ncut_top{k}_eig.png')
+            #     # Save RGB t-SNE images in a big image, 5x5
+            #     big_image = np.zeros((4 * 14 + 3 * 1, 10 * 14 + 9 * 1, 3), dtype=np.uint8)  # Adjusted for 10 columns with spaces between images
+            #     for r in range(4):
+            #         for c in range(10):
+            #             index = r * 38 + c * 3
+            #             if index < len(tsne_rgb):
+            #                 big_image[(r * 14) + r:(r + 1) * 14 + r, (c * 14) + c:(c + 1) * 14 + c, :] = tsne_rgb[index] * 255.0  # Adjusted indices to include spaces
+            #     plt.clf()
+            #     plt.figure(figsize=(8, 4))
+            #     plt.imshow(big_image)
+            #     plt.title('ResNet Feature')
+            #     plt.axis('off')
+            #     plt.savefig(f'feature_visualization/{ckpt_name}/tsne_ncut_top{k}_eig.png')
 
             if i >= end:
                 break

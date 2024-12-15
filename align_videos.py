@@ -214,20 +214,13 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
     """
     # Load videos
     if dataset == 'PennAction':
-        train_dataset, val_dataset = PennAction(data_size=10000000, dont_split=False)
+        train_dataset = PennAction(data_size=10000000, dont_split=True)
         print('Dataset loaded')
         print('Number of frames of each video:', len(train_dataset[0][0]))
         print('Number of videos in train dataset:', len(train_dataset))
-        print('Number of videos in val dataset:', len(val_dataset))
         trainloader = DataLoader(
             train_dataset, 
             batch_size=2, 
-            collate_fn=collate_fn,
-            drop_last=True,
-            shuffle=False)
-        valloader = DataLoader(
-            val_dataset,
-            batch_size=2,
             collate_fn=collate_fn,
             drop_last=True,
             shuffle=False)
@@ -235,32 +228,22 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
         if valonval:
             i += len(train_dataset)
         end = i + 10
-        if valonval:
-            loader = valloader
-        else:
-            loader = trainloader
-        for batch in loader:
-            frames, steps, seq_lens = batch
+        loader = trainloader
+        indicies = [34,145,156,19,70,91,22,124,20,59]
+        for idx in range(0,len(indicies),2):
+            batch = loader.dataset[indicies[idx]],loader.dataset[indicies[idx+1]]  # Access the dataset directly using the index
+            frames = torch.stack([batch[0][0], batch[1][0]])
+            steps = [batch[0][1], batch[1][1]]
             frames = frames.permute(0, 1, 3, 4, 2).contiguous()
             frames = frames.detach().cpu().numpy()
             frames = (frames * 255).astype('uint8')
             # check if the frames are correct
             fps = 10 if downsample else 30
             h, w = frames[0][0].shape[:2]
-            output_path = f'result/{ckpt_name}/frames{i}.mp4'
-            save_video(
-                frames[0],
-                output_path,
-                fps,  
-                (w, h)   # Double width for side-by-side
-            )
-            output_path = f'result/{ckpt_name}/frames{i+1}.mp4'
-            save_video(
-                frames[1],
-                output_path,
-                fps,  
-                (w, h)  # Double width for side-by-side
-            )
+            output_path = f'result/{ckpt_name}/frames{i}.png'
+            cv2.imwrite(output_path, cv2.cvtColor(frames[0][0], cv2.COLOR_BGR2RGB))
+            output_path = f'result/{ckpt_name}/frames{i+1}.png'
+            cv2.imwrite(output_path, cv2.cvtColor(frames[1][0], cv2.COLOR_BGR2RGB))
             # # Plot the frames to check if they are correct
             # fig, axes = plt.subplots(1, 2, figsize=(10, 5))
             # axes[0].imshow(frames[0][0])
@@ -268,9 +251,9 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             # axes[1].imshow(frames[1][0])
             # axes[1].set_title('First Frame of Video 2')
             # fig.savefig('result/frames{}and{}.png'.format(i, i+1))
-            steps1 = steps[0].numpy()
+            steps1 = np.array(steps[0])
             # print('steps1:', steps1)
-            steps2 = steps[1].numpy()
+            steps2 = np.array(steps[1])
             # print('steps2:', steps2)
             features1 = extract_features(frames[0], model)
             features2 = extract_features(frames[1], model)
@@ -588,7 +571,7 @@ def main():
     video1_path = video_dir + args.vidpath1
     video2_path = video_dir + args.vidpath2
     output_path = args.vidpath1.split('/')[1][:-4] + '&' + args.vidpath2.split('/')[1][:-4] + 'withDTW' + str(args.use_dtw) + '.mp4'
-    output_path = 'result/' + output_path
+    output_path = f'result/{ckpt_name}/' + output_path
     align_videos(
         video1_path=video1_path,
         video2_path=video2_path,
