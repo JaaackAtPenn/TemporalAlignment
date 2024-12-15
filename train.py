@@ -179,7 +179,6 @@ class LitModel(pl.LightningModule):
                  similarity_type='l2', 
                  temperature=0.1, 
                  variance_lambda=0.001, 
-                 use_random_window=False, 
                  use_align_alpha=False, 
                  align_alpha_strength=0.1, 
                  do_not_reduce_frame_rate=False, 

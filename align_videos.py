@@ -594,7 +594,7 @@ def main():
         use_dtw=args.use_dtw,
         temperature=args.temperature,
         similarity_type=args.similarity_type,
-        ckpt_name=ckpt_name
+        ckpt_name=ckpt_name,
         use_random_window=args.use_random_window,
         use_center_window=args.use_center_window,
         window_size=args.window_size
