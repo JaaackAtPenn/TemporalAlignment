@@ -30,10 +30,7 @@ class VideoDataset(Dataset):        # all the videos are trimmed to the shortest
             print(f"Processing video {i+1}/{len(video_files)}: {video_file.name}")
             self.frames.append(self.preprocess_video(video_file))
         # Find the shortest video length
-        shortest_video_length = min(frame.shape[0] for frame in self.frames)
-        
-        # Trim all videos to the shortest length, discarding time from the front
-        self.frames = [frame[-shortest_video_length:] for frame in self.frames]
+        self.shortest_sequence_length = min(frame.shape[0] for frame in self.frames)
 
         print("VideoDataset initialization complete!")
 
@@ -54,7 +51,16 @@ class VideoDataset(Dataset):        # all the videos are trimmed to the shortest
         return len(self.video_files)
         
     def __getitem__(self, idx):
-        return self.frames[idx]
+        sequence = self.frames[idx]
+
+        if len(sequence) > self.shortest_sequence_length:
+            sampled_indices = sorted(random.sample(range(len(sequence)), self.shortest_sequence_length))
+            sampled_sequence = torch.stack([sequence[i] for i in sampled_indices])
+        else:
+            sampled_indices = list(range(len(sequence)))
+            sampled_sequence = sequence
+        
+        return sampled_sequence, sampled_indices, len(sequence)   
 
 def collate_fn(batch):
     # Pad sequences to the same length
@@ -168,10 +174,27 @@ class FrameSequenceDataset(Dataset):
         return sorted(filtered_folders, key=lambda x: int(x.name))
     
 class LitModel(pl.LightningModule):
-    def __init__(self, model=None, loss_type='regression_mse_var', similarity_type='l2', temperature=0.1, variance_lambda=0.001, use_random_window=False, use_center_window=False, window_size=5, use_align_alpha=False, align_alpha_strength=0.1, do_not_reduce_frame_rate=False, small_embedder=False, dont_stack=False):
+    def __init__(self, model=None, 
+                 loss_type='regression_mse_var', 
+                 similarity_type='l2', 
+                 temperature=0.1, 
+                 variance_lambda=0.001, 
+                 use_random_window=False, 
+                 use_align_alpha=False, 
+                 align_alpha_strength=0.1, 
+                 do_not_reduce_frame_rate=False, 
+                 small_embedder=False, 
+                 dont_stack=False, 
+                 front_temp_emb=False, 
+                 back_temp_emb=False, 
+                 use_random_window=False, 
+                 use_center_window=False, 
+                 window_size=5
+                 ):
+
         super().__init__()
         print("Initializing LitModel...")
-        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate, small_embedder=small_embedder, dont_stack=dont_stack)
+        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate, small_embedder=small_embedder, dont_stack=dont_stack, front_temporal_emb=front_temp_emb, back_temporal_emb=back_temp_emb)
         self.loss_type = loss_type
         self.similarity_type = similarity_type
         self.temperature = temperature
@@ -243,7 +266,7 @@ class LitModel(pl.LightningModule):
 def DBgolf():
     print("Starting training process...")
     print("Loading video files...")
-    video_dir = Path('./data/GolfDB')
+    video_dir = Path('../data/GolfDB')
     if video_dir.exists() and video_dir.is_dir():
         video_files = list(video_dir.glob('*.mp4')) + list(video_dir.glob('*.MP4'))
         if not video_files:
@@ -254,7 +277,6 @@ def DBgolf():
         print("Directory does not exist or is not a valid directory.")
     video_files = [file for file in video_files if int(str(file).split('/')[-1].split('.')[0]) % 2 == (0 if not args.use_120fps else 1)]
     video_files.sort(key=lambda x : int(str(x).split('/')[-1].split('.')[0]))
-    video_files = video_files[:10]
     print(video_files)
     print(f"Found {len(video_files)} video files")
     # Split into train/val sets
@@ -371,8 +393,30 @@ def train(args):
         persistent_workers=True
     )
     
+    front_temp_emb = False
+    back_temp_emb = False
+    if args.use_temporal_embedding:
+        if args.temporal_embedding_location == 'both' or args.temporal_embedding_location == 'front':
+            front_temp_emb = True
+        if args.temporal_embedding_location == 'both' or args.temporal_embedding_location == 'back':
+            back_temp_emb = True
+
     print("Initializing model...")
-    model = LitModel(loss_type=args.loss_type, similarity_type=args.similarity_type, temperature=args.temperature, variance_lambda=args.variance_lambda, use_random_window=args.use_random_window, use_center_window=args.use_center_window, window_size=args.window_size, use_align_alpha=args.use_align_alpha, align_alpha_strength=args.align_alpha_strength, do_not_reduce_frame_rate=args.do_not_reduce_frame_rate, small_embedder=args.small_embedder, dont_stack=args.dont_stack)
+    model = LitModel(loss_type=args.loss_type, 
+                     similarity_type=args.similarity_type, 
+                     temperature=args.temperature, 
+                     variance_lambda=args.variance_lambda, 
+                     use_random_window=args.use_random_window, 
+                     use_align_alpha=args.use_align_alpha, 
+                     align_alpha_strength=args.align_alpha_strength, 
+                     do_not_reduce_frame_rate=args.do_not_reduce_frame_rate, 
+                     small_embedder=args.small_embedder, 
+                     dont_stack=args.dont_stack,
+                     front_temp_emb=front_temp_emb,
+                     back_temp_emb=back_temp_emb,
+                     use_random_window=args.use_random_window, 
+                     use_center_window=args.use_center_window, 
+                     window_size=args.window_size)
 
     base_model_stats = count_model_parameters(model.model.cnn, "BaseModel")
     conv_embedder_stats = count_model_parameters(model.model.emb, "ConvEmbedder")
@@ -440,6 +484,8 @@ if __name__ == "__main__":
         parser.add_argument('--window_size', type=int, default=5, help='Size of window for random window cropping')
         parser.add_argument('--use_align_alpha', action='store_true', help='Whether to use alignment alpha')
         parser.add_argument('--align_alpha_strength', type=float, default=0.1, help='Strength of alignment alpha')
+        parser.add_argument('--use_temporal_embedding', action='store_true', help='Whether to use temporal embedding')
+        parser.add_argument('--temporal_embedding_location', type=str, default='both', choices=['front', 'back', 'both'], help='Whether to use temporal embedding')
         parser.add_argument('--do_not_reduce_frame_rate', action='store_true', help='Whether to reduce frame rate to 10fps')
         parser.add_argument('--use_120fps', action='store_true', help='Whether to use 120fps videos')
         parser.add_argument('--dataset', type=str, default='PennAction', choices=['GolfDB', 'PennAction'], help='Dataset to use for training')

@@ -206,7 +206,8 @@ def euclidean_distance(x, y):
     y = y.cpu().numpy() if isinstance(y, torch.Tensor) else y
     return np.sqrt(np.sum((x - y) ** 2))
 
-def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False, temperature: float = 0.1, similarity_type: str = 'cosine', use_random_window: bool = False, use_center_window: bool = False, window_size: int = 5):
+
+def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False, temperature: float = 0.1, similarity_type: str = 'cosine', use_random_window: bool = False, use_center_window: bool = False, window_size: int = 5, ckpt_name=''):
     """Align two videos using extracted features and save aligned result.
     
     Args:
@@ -217,20 +218,13 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
     """
     # Load videos
     if dataset == 'PennAction':
-        train_dataset, val_dataset = PennAction(data_size=10000000, dont_split=False)
+        train_dataset = PennAction(data_size=10000000, dont_split=True)
         print('Dataset loaded')
         print('Number of frames of each video:', len(train_dataset[0][0]))
         print('Number of videos in train dataset:', len(train_dataset))
-        print('Number of videos in val dataset:', len(val_dataset))
         trainloader = DataLoader(
             train_dataset, 
             batch_size=2, 
-            collate_fn=collate_fn,
-            drop_last=True,
-            shuffle=False)
-        valloader = DataLoader(
-            val_dataset,
-            batch_size=2,
             collate_fn=collate_fn,
             drop_last=True,
             shuffle=False)
@@ -238,32 +232,22 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
         if valonval:
             i += len(train_dataset)
         end = i + 10
-        if valonval:
-            loader = valloader
-        else:
-            loader = trainloader
-        for batch in loader:
-            frames, steps, seq_lens = batch
+        loader = trainloader
+        indicies = [34,145,156,19,70,91,22,124,20,59]
+        for idx in range(0,len(indicies),2):
+            batch = loader.dataset[indicies[idx]],loader.dataset[indicies[idx+1]]  # Access the dataset directly using the index
+            frames = torch.stack([batch[0][0], batch[1][0]])
+            steps = [batch[0][1], batch[1][1]]
             frames = frames.permute(0, 1, 3, 4, 2).contiguous()
             frames = frames.detach().cpu().numpy()
             frames = (frames * 255).astype('uint8')
             # check if the frames are correct
             fps = 10 if downsample else 30
             h, w = frames[0][0].shape[:2]
-            output_path = 'result/frames{}.mp4'.format(i)
-            save_video(
-                frames[0],
-                output_path,
-                fps,  
-                (w, h)   # Double width for side-by-side
-            )
-            output_path = 'result/frames{}.mp4'.format(i+1)
-            save_video(
-                frames[1],
-                output_path,
-                fps,  
-                (w, h)  # Double width for side-by-side
-            )
+            output_path = f'result/{ckpt_name}/frames{i}.png'
+            cv2.imwrite(output_path, cv2.cvtColor(frames[0][0], cv2.COLOR_BGR2RGB))
+            output_path = f'result/{ckpt_name}/frames{i+1}.png'
+            cv2.imwrite(output_path, cv2.cvtColor(frames[1][0], cv2.COLOR_BGR2RGB))
             # # Plot the frames to check if they are correct
             # fig, axes = plt.subplots(1, 2, figsize=(10, 5))
             # axes[0].imshow(frames[0][0])
@@ -271,9 +255,9 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             # axes[1].imshow(frames[1][0])
             # axes[1].set_title('First Frame of Video 2')
             # fig.savefig('result/frames{}and{}.png'.format(i, i+1))
-            steps1 = steps[0].numpy()
+            steps1 = np.array(steps[0])
             # print('steps1:', steps1)
-            steps2 = steps[1].numpy()
+            steps2 = np.array(steps[1])
             # print('steps2:', steps2)
             features1 = extract_features(frames[0], model)
             features2 = extract_features(frames[1], model)
@@ -300,7 +284,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             plt.title('Similarity HeatMap')
             plt.xlabel('Frames of Video {}'.format(i))
             plt.ylabel('Frames of Video {}'.format(i+1))
-            plt.savefig('result/similarity_heatmap_{}and{}.png'.format(i, i+1))            
+            plt.savefig(f'result/{ckpt_name}/similarity_heatmap_{i}and{i+1}.png'    )   
             # plt.show()
 
             # Plot self distance matrix as heatmap
@@ -310,7 +294,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             plt.title('Self Similarity HeatMap of Video {}'.format(i))
             plt.xlabel('Frames of Video {}'.format(i))
             plt.ylabel('Frames of Video {}'.format(i))
-            plt.savefig('result/self_similarity_heatmap_{}.png'.format(i))
+            plt.savefig(f'result/{ckpt_name}/self_similarity_heatmap_{i}.png')
             # plt.show()
 
             # Plot self distance matrix as heatmap
@@ -320,7 +304,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             plt.title('Self Similarity HeatMap of Video {}'.format(i+1))
             plt.xlabel('Frames of Video {}'.format(i+1))
             plt.ylabel('Frames of Video {}'.format(i+1))
-            plt.savefig('result/self_similarity_heatmap_{}.png'.format(i+1))
+            plt.savefig(f'result/{ckpt_name}/self_similarity_heatmap_{i+1}.png')
             # plt.show()
 
             # Plot cycle distance matrix as heatmap
@@ -330,7 +314,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             plt.title('Cycle Similarity HeatMap')
             plt.xlabel('Frames of Video {}'.format(i))
             plt.ylabel('Frames of Video {}'.format(i))
-            plt.savefig('result/cycle_similarity_heatmap_{}and{}.png'.format(i, i+1))
+            plt.savefig(f'result/{ckpt_name}/cycle_similarity_heatmap_{i}and{i+1}.png')
             # plt.show()
 
             matches = sim12.argmax(dim=1)
@@ -350,7 +334,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
                 create_side_by_side_frame(f1, f2, f1i, f2ic, f2il) 
                 for f1, f2, f1i, f2ic, f2il in zip(aligned_frames1, aligned_frames2, frame1_indices, frame2_indices_cur, frame2_indices_last)
             ]
-            output_path = 'result/aligned_videos{}and{}DTW{}.mp4'.format(i, i+1, use_dtw)
+            output_path = f'result/{ckpt_name}/aligned_videos{i}and{i+1}DTW{use_dtw}.mp4'
             # plt.imshow(combined_frames[0])
             # plt.title('First Frame of Combined Frames')
             # plt.show()
@@ -536,9 +520,12 @@ def main():
         parser.add_argument('--seed', type=int, default=42, help='Random seed')
         parser.add_argument('--temperature', type=float, default=0.1, help='Temperature for softmax')
         parser.add_argument('--similarity_type', type=str, default='l2', help='Type of similarity to use')
+        parser.add_argument('--use_temporal_embedding', action='store_true', help='Whether to use temporal embedding')
+        parser.add_argument('--temporal_embedding_location', type=str, default='both', choices=['front', 'back', 'both'], help='Whether to use temporal embedding')
         parser.add_argument('--use_random_window', action='store_true', help='Use random window for alignment')
         parser.add_argument('--use_center_window', action='store_true', help='Use center window for alignment')
         parser.add_argument('--window_size', type=int, default=5, help='Window size for alignment')
+
         return parser.parse_args()
 
     args = parse_args()
@@ -546,8 +533,17 @@ def main():
     np.random.seed(args.seed)
     random.seed(args.seed)
     
+    front_temp_emb = False
+    back_temp_emb = False
+    if args.use_temporal_embedding:
+        if args.temporal_embedding_location == 'both' or args.temporal_embedding_location == 'front':
+            front_temp_emb = True
+        if args.temporal_embedding_location == 'both' or args.temporal_embedding_location == 'back':
+            back_temp_emb = True
+
+    
     # Load feature extraction model
-    model = ModelWrapper() if args.downsample else ModelWrapper(dont_stack=not args.downsample)
+    model = ModelWrapper(front_temporal_emb=front_temp_emb, back_temporal_emb=back_temp_emb) if args.downsample else ModelWrapper(dont_stack=not args.downsample, front_temporal_emb=front_temp_emb, back_temporal_emb=back_temp_emb)
 
     # Find the checkpoint with the smallest val_loss
     checkpoint_dir = 'checkpoints'
@@ -561,6 +557,7 @@ def main():
         checkpoint_path = os.path.join(checkpoint_dir, checkpoint_files[0])
         model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
         model.eval()
+        ckpt_name = ''
     else:
         # Load the specified checkpoint
         checkpoint_path = os.path.join(checkpoint_dir, args.ckpt)
@@ -569,19 +566,23 @@ def main():
         else:
             model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
         model.eval()
+        ckpt_name = (args.ckpt).split('.')[0].split('-')[1]
 
 
     if torch.cuda.is_available():
         model = model.cuda()
     elif torch.backends.mps.is_available():
         model = model.to('mps')
-    
+
+    if not os.path.exists('result/' + ckpt_name):
+        os.mkdir('result/' + ckpt_name)
+
     # Align videos
     video_dir = '../data/'
     video1_path = video_dir + args.vidpath1
     video2_path = video_dir + args.vidpath2
     output_path = args.vidpath1.split('/')[1][:-4] + '&' + args.vidpath2.split('/')[1][:-4] + 'withDTW' + str(args.use_dtw) + '.mp4'
-    output_path = 'result/' + output_path
+    output_path = f'result/{ckpt_name}/' + output_path
     align_videos(
         video1_path=video1_path,
         video2_path=video2_path,
@@ -593,6 +594,7 @@ def main():
         use_dtw=args.use_dtw,
         temperature=args.temperature,
         similarity_type=args.similarity_type,
+        ckpt_name=ckpt_name
         use_random_window=args.use_random_window,
         use_center_window=args.use_center_window,
         window_size=args.window_size
