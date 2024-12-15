@@ -214,7 +214,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
     """
     # Load videos
     if dataset == 'PennAction':
-        train_dataset, val_dataset = PennAction(data_size=10000000, dont_split=False)
+        train_dataset, val_dataset = PennAction(data_size=10000000, validate=True)
         print('Dataset loaded')
         print('Number of frames of each video:', len(train_dataset[0][0]))
         print('Number of videos in train dataset:', len(train_dataset))

@@ -453,6 +453,8 @@ def compute_alignment_loss(embs,          # [B, T, D]
         seq_lens = torch.tensor([num_steps]*batch_size, device=embs.device)
 
     # Check if batch size embs is consistent with provided batch size.
+    # print('num_steps:', num_steps)
+    # print('steps shape:', steps.shape)
     assert batch_size == embs.shape[0], "Batch size does not match embs shape"
     assert num_steps == steps.shape[1], "num_steps does not match steps shape"
     assert batch_size == steps.shape[0], "Batch size does not match steps shape"

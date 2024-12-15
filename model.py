@@ -35,6 +35,7 @@ class ConvEmbedder(nn.Module):
         self.fc_dropout = nn.Dropout(fc_dropout_rate)
 
     def forward(self, x):
+        # print('x shape:', x.shape)
         
         # Reshape to (batch_size, feature_channels, num_steps, height, width) for 3D Conv
         x = x.permute(0, 2, 1, 3, 4)
@@ -102,6 +103,7 @@ class BaseModel(nn.Module):
 
         # Extract features
         features = self.base_model(x)
+        # print('features shape:', features.shape)
 
         # Restore temporal dimension
         feature_channels, h, w = features.shape[1:]
@@ -120,13 +122,16 @@ class ModelWrapper(nn.Module):
         self.dont_stack = dont_stack
 
     def forward(self, data):
+        # print('data shape:', data.shape)
         
         # Pass through resnet50
         cnn_feats = self.cnn(data)
+        # print('cnn_feats shape:', cnn_feats.shape)
 
         # stack features
         context_frames = 3
         batch_size, num_frames, channels, feature_h, feature_w = cnn_feats.shape
+        # print('dont_stack:', self.dont_stack)
         if self.dont_stack:
             num_context = num_frames
         else:
@@ -143,7 +148,9 @@ class ModelWrapper(nn.Module):
                 cnn_feats = cnn_feats.reshape(batch_size * num_context, context_frames, channels, feature_h, feature_w)
 
         # Pass CNN features through Embedder
+        # print('cnn_feats shape:', cnn_feats.shape)
         embs = self.emb(cnn_feats)          # cnn_feats: (batch_size, num_frames, channels, feature_h, feature_w)
+        # print('embs shape:', embs.shape)
 
         # Reshape to (batch_size, num_frames, embedding_dim)
         channels = embs.shape[-1]
