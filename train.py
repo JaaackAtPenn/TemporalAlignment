@@ -186,7 +186,12 @@ class LitModel(pl.LightningModule):
                  small_embedder=False, 
                  dont_stack=False, 
                  front_temp_emb=False, 
-                 back_temp_emb=False):
+                 back_temp_emb=False, 
+                 use_random_window=False, 
+                 use_center_window=False, 
+                 window_size=5
+                 ):
+
         super().__init__()
         print("Initializing LitModel...")
         self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate, small_embedder=small_embedder, dont_stack=dont_stack, front_temporal_emb=front_temp_emb, back_temporal_emb=back_temp_emb)
@@ -197,13 +202,15 @@ class LitModel(pl.LightningModule):
         self.use_random_window = use_random_window
         self.use_align_alpha = use_align_alpha
         self.align_alpha_strength = align_alpha_strength
+        self.use_center_window = use_center_window
+        self.window_size = window_size
         # self.training_outputs = []
         # self.validation_outputs = []
                 
     def training_step(self, batch, batch_idx):
         x, steps, seq_lens = batch
         y_hat = self(x)
-        similarity_loss, time_loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
+        similarity_loss, time_loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_center_window=self.use_center_window, window_size=self.window_size, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
         total_loss = similarity_loss + time_loss
         self.log('train_similarity_loss', similarity_loss)
         self.log('train_time_loss', time_loss)
@@ -225,7 +232,7 @@ class LitModel(pl.LightningModule):
         x, steps, seq_lens = batch
         with torch.no_grad():
             y_hat = self(x)
-        similarity_loss, time_loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
+        similarity_loss, time_loss = compute_alignment_loss(y_hat, steps=steps, seq_lens=seq_lens, batch_size=x.shape[0], loss_type=self.loss_type, similarity_type=self.similarity_type, temperature=self.temperature, variance_lambda=self.variance_lambda, use_random_window=self.use_random_window, use_center_window=self.use_center_window, window_size=self.window_size, use_align_alpha=self.use_align_alpha, align_alpha_strength=self.align_alpha_strength)
         total_loss = similarity_loss + time_loss
         self.log('val_similarity_loss', similarity_loss)
         self.log('val_time_loss', time_loss)
@@ -406,7 +413,10 @@ def train(args):
                      small_embedder=args.small_embedder, 
                      dont_stack=args.dont_stack,
                      front_temp_emb=front_temp_emb,
-                     back_temp_emb=back_temp_emb)
+                     back_temp_emb=back_temp_emb,
+                     use_random_window=args.use_random_window, 
+                     use_center_window=args.use_center_window, 
+                     window_size=args.window_size)
 
     base_model_stats = count_model_parameters(model.model.cnn, "BaseModel")
     conv_embedder_stats = count_model_parameters(model.model.emb, "ConvEmbedder")
@@ -444,7 +454,7 @@ def train(args):
     
     print("Initializing trainer...")
     trainer = pl.Trainer(
-        max_epochs=300,
+        max_epochs=args.epoch,
         callbacks=[checkpoint_callback],
         logger=logger,
         accelerator='gpu'
@@ -470,6 +480,8 @@ if __name__ == "__main__":
         parser.add_argument('--temperature', type=float, default=0.1, help='Temperature parameter for contrastive loss')
         parser.add_argument('--variance_lambda', type=float, default=0.001, help='Lambda parameter for variance loss')
         parser.add_argument('--use_random_window', action='store_true', help='Whether to use random window cropping')
+        parser.add_argument('--use_center_window', action='store_true', help='Whether to use center window cropping')
+        parser.add_argument('--window_size', type=int, default=5, help='Size of window for random window cropping')
         parser.add_argument('--use_align_alpha', action='store_true', help='Whether to use alignment alpha')
         parser.add_argument('--align_alpha_strength', type=float, default=0.1, help='Strength of alignment alpha')
         parser.add_argument('--use_temporal_embedding', action='store_true', help='Whether to use temporal embedding')
@@ -487,6 +499,7 @@ if __name__ == "__main__":
         parser.add_argument('--validate', action='store_true', help='Whether to validate')
         parser.add_argument('--small_embedder', action='store_true', help='Whether to use a smaller embedder')           # reduce channels from 512 to 256
         parser.add_argument('--use_batch_minlen', action='store_true', help='Whether to use the shortest video length within a batch, rather than the whole dataset')         # To keep the frames as many as possible
+        parser.add_argument('--epoch', type=int, default=500, help='Number of epochs to train')
         return parser.parse_args()
 
     args = parse_args()
@@ -497,6 +510,13 @@ if __name__ == "__main__":
     print("--------------------------------- Starting Training ---------------------------------")
     train(args)
     print("--------------------------------- Training Complete ---------------------------------")
+    print("------------------------------------------------------------------------------------")
+    print("--------------------------------- Use center window ---------------------------------")
+    args.use_center_window = True
+    args.use_random_window = False
+    args.epoch = 1000
+    train(args)
+    print("------------------------------------------------------------------------------------")
 
     # align_alpha_strengths = [0.1, 0.3, 1.0, 3.0, 10.0]
     # for align_alpha_strength in align_alpha_strengths:

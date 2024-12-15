@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 from dtw import dtw
 from torch.nn import functional as F
 import random
-
 from model import ModelWrapper
 from losses import get_scaled_similarity
 from train import PennAction, collate_fn
@@ -19,6 +18,8 @@ from typing import List, Tuple
 import os
 import re
 import argparse
+import seaborn as sns
+
 
 def load_video(video_path: str) -> Tuple[np.ndarray, int, int]:
     """Load video and return frames, fps, and frame count."""
@@ -177,6 +178,7 @@ def display_frames(frames: List[np.ndarray], fps: int):
     cv2.destroyAllWindows()
 
 def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: torch.Tensor, downsample) -> Tuple[np.ndarray, np.ndarray]:
+
     """Get aligned frames using computed indices.
     
     Args:
@@ -195,6 +197,7 @@ def get_aligned_frames(frames1: np.ndarray, frames2: np.ndarray, aligned_idxs: t
         aligned_frames2 = frames2[aligned_idxs.numpy()]
         aligned_frames1 = frames1
 
+
     # Make sure frames match in count
     return aligned_frames1, aligned_frames2
 
@@ -203,7 +206,8 @@ def euclidean_distance(x, y):
     y = y.cpu().numpy() if isinstance(y, torch.Tensor) else y
     return np.sqrt(np.sum((x - y) ** 2))
 
-def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False, temperature: float = 0.1, similarity_type: str = 'cosine', ckpt_name=''):
+
+def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output_path: str = None, downsample: bool = True, dataset: str = 'PennAction', valonval: bool = False, use_dtw: bool = False, temperature: float = 0.1, similarity_type: str = 'cosine', use_random_window: bool = False, use_center_window: bool = False, window_size: int = 5, ckpt_name=''):
     """Align two videos using extracted features and save aligned result.
     
     Args:
@@ -261,16 +265,16 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
             features2 = features2.cpu()
             # print('features1:', features1.shape)
             # print('features2:', features2.shape)
-            sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature)      # [N1, N2]
-            sim12 = F.softmax(sim12, dim=1)
-            sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature)
-            sim11 = F.softmax(sim11, dim=1)
-            sim22 = get_scaled_similarity(features2, features2, similarity_type, temperature)
-            sim22 = F.softmax(sim22, dim=1)
+            sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)      # [N1, N2]
+            # sim12 = F.softmax(sim12, dim=1)
+            sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)
+            # sim11 = F.softmax(sim11, dim=1)
+            sim22 = get_scaled_similarity(features2, features2, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)
+            # sim22 = F.softmax(sim22, dim=1)
 
             selected_features2 = torch.mm(sim12, features2)          # [N1, D], tilda v_i
-            cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature)       # [N1, N1]
-            cycle_sim11 = F.softmax(sim11, dim=1)
+            cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)       # [N1, N1]
+            # cycle_sim11 = F.softmax(sim11, dim=1)
             # print('cycle_dist:', cycle_dist)
 
             # Plot distance matrix as heatmap
@@ -360,14 +364,15 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
         features2 = features2.cpu()
 
         # Compute similarities between embs1 and embs2
-        sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature)       # [N1/3, N2/3] or [N1, N2]
-        sim12 = F.softmax(sim12, dim=1)
-        sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature)
-        sim11 = F.softmax(sim11, dim=1)
+        sim12 = get_scaled_similarity(features1, features2, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)       # [N1/3, N2/3] or [N1, N2]
+        # print('sim12:', sim12)
+        # sim12 = F.softmax(sim12, dim=1)
+        sim11 = get_scaled_similarity(features1, features1, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)
+        # sim11 = F.softmax(sim11, dim=1)
 
         selected_features2 = torch.mm(sim12, features2)          # [N1, D], tilda v_i
-        cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature)       # [N1, N1]
-        cycle_sim11 = F.softmax(cycle_sim11, dim=1)
+        cycle_sim11 = get_scaled_similarity(selected_features2, features1, similarity_type, temperature, use_random_window=use_random_window, use_center_window=use_center_window, window_size=window_size)       # [N1, N1]
+        # cycle_sim11 = F.softmax(cycle_sim11, dim=1)
 
         # Plot distance matrix as heatmap
         plt.figure(figsize=(10, 8))
@@ -465,6 +470,7 @@ def align_videos(video1_path: str, video2_path: str, model: ModelWrapper, output
 #     """
 #     if i % 3 != 0:
 #         raise ValueError("Frame index i must be a multiple of 3")
+
     
 #     # Load videos
 #     frames1, _, _ = load_video(video1_path)
@@ -516,7 +522,10 @@ def main():
         parser.add_argument('--similarity_type', type=str, default='l2', help='Type of similarity to use')
         parser.add_argument('--use_temporal_embedding', action='store_true', help='Whether to use temporal embedding')
         parser.add_argument('--temporal_embedding_location', type=str, default='both', choices=['front', 'back', 'both'], help='Whether to use temporal embedding')
-        
+        parser.add_argument('--use_random_window', action='store_true', help='Use random window for alignment')
+        parser.add_argument('--use_center_window', action='store_true', help='Use center window for alignment')
+        parser.add_argument('--window_size', type=int, default=5, help='Window size for alignment')
+
         return parser.parse_args()
 
     args = parse_args()
@@ -539,6 +548,7 @@ def main():
     # Find the checkpoint with the smallest val_loss
     checkpoint_dir = 'checkpoints'
     checkpoint_files = os.listdir(checkpoint_dir)
+
     if args.ckpt is None:
         checkpoint_files = [file for file in checkpoint_files if file.startswith('model-') and file.endswith('.ckpt')]
         checkpoint_files.sort(key=lambda x: float(re.search(r'epoch=([0-9])', x).group(1)), reverse=True)
@@ -557,6 +567,7 @@ def main():
             model.load_state_dict(torch.load(checkpoint_path)['state_dict'])
         model.eval()
         ckpt_name = (args.ckpt).split('.')[0].split('-')[1]
+
 
     if torch.cuda.is_available():
         model = model.cuda()
@@ -584,6 +595,9 @@ def main():
         temperature=args.temperature,
         similarity_type=args.similarity_type,
         ckpt_name=ckpt_name
+        use_random_window=args.use_random_window,
+        use_center_window=args.use_center_window,
+        window_size=args.window_size
     )
 
     # # Check aligned frame
