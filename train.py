@@ -183,7 +183,7 @@ class LitModel(pl.LightningModule):
                  align_alpha_strength=0.1, 
                  do_not_reduce_frame_rate=False, 
                  small_embedder=False, 
-                 dont_stack=False, 
+                 dont_stack=False, schedule_window=False, 
                  front_temp_emb=False, 
                  back_temp_emb=False, 
                  use_random_window=False, 
@@ -193,7 +193,13 @@ class LitModel(pl.LightningModule):
 
         super().__init__()
         print("Initializing LitModel...")
-        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=do_not_reduce_frame_rate, small_embedder=small_embedder, dont_stack=dont_stack, front_temporal_emb=front_temp_emb, back_temporal_emb=back_temp_emb)
+        self.save_hyperparameters()
+        self.do_not_reduce_frame_rate = do_not_reduce_frame_rate
+        self.small_embedder = small_embedder
+        self.dont_stack = dont_stack
+        self.front_temp_emb = front_temp_emb
+        self.back_temp_emb = back_temp_emb
+        self.model = model if model else ModelWrapper(do_not_reduce_frame_rate=self.do_not_reduce_frame_rate, small_embedder=self.small_embedder, dont_stack=self.dont_stack, front_temporal_emb=self.front_temp_emb, back_temporal_emb=self.back_temp_emb)
         self.loss_type = loss_type
         self.similarity_type = similarity_type
         self.temperature = temperature
@@ -203,8 +209,31 @@ class LitModel(pl.LightningModule):
         self.align_alpha_strength = align_alpha_strength
         self.use_center_window = use_center_window
         self.window_size = window_size
+        self.schedule_window = schedule_window
         # self.training_outputs = []
         # self.validation_outputs = []
+        print("Using parameters:")
+        print(f"Loss type: {self.loss_type}")
+        print(f"Similarity type: {self.similarity_type}")
+        print(f"Temperature: {self.temperature}")
+        print(f"Variance lambda: {self.variance_lambda}")
+        print(f"Use random window: {self.use_random_window}")
+        print(f"Use center window: {self.use_center_window}")
+        print(f"Window size: {self.window_size}")
+        print(f"Use align alpha: {self.use_align_alpha}")
+        print(f"Align alpha strength: {self.align_alpha_strength}")
+        print(f"Do not reduce frame rate: {self.do_not_reduce_frame_rate}")
+        print(f"Small embedder: {self.small_embedder}")
+        print(f"Dont stack: {self.dont_stack}")
+        print(f"Schedule window: {self.schedule_window}")
+
+    def on_train_epoch_start(self):
+        # print(f"Epoch {self.current_epoch}: Window size: {self.window_size}")
+        if self.schedule_window:
+            if self.current_epoch % 500 == 0 and self.current_epoch != 0:
+                self.window_size += 2
+                print(f"Epoch {self.current_epoch}: Increasing window size to {self.window_size}")
+            
                 
     def training_step(self, batch, batch_idx):
         x, steps, seq_lens = batch
@@ -292,7 +321,7 @@ def DBgolf():
     val_dataset = VideoDataset(val_files)
     return train_dataset, val_dataset
 
-def PennAction(use_golf_folders=True, data_size=0, dont_split=False, use_batch_minlen=False):
+def PennAction(use_golf_folders=True, data_size=0, validate=False, use_batch_minlen=False):
     print("Starting training process...")
     print("Loading video files...")
     # frame_dir = Path('./data/Penn_Action/Penn_Action/frames')
@@ -309,7 +338,8 @@ def PennAction(use_golf_folders=True, data_size=0, dont_split=False, use_batch_m
         dataset = torch.utils.data.Subset(dataset, range(min(max_sequences, len(dataset))))
         print(f"Reduced dataset size: {len(dataset)}")
 
-        if dont_split:
+        if not validate:
+            print("Dataset not splited.")
             return dataset
         else:
             # Split dataset into train and validation sets
@@ -367,7 +397,10 @@ def train(args):
     if args.dataset == 'GolfDB':
         train_dataset, val_dataset = DBgolf()
     elif args.dataset == 'PennAction':
-        train_dataset, val_dataset = PennAction(args.use_golf_folders, args.data_size, args.use_batch_minlen)
+        if args.validate:
+            train_dataset, val_dataset = PennAction(args.use_golf_folders, args.data_size, args.use_batch_minlen)
+        else:
+            train_dataset = PennAction(use_golf_folders=args.use_golf_folders, data_size=args.data_size, validate=args.validate, use_batch_minlen=args.use_batch_minlen)
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
         
@@ -401,7 +434,16 @@ def train(args):
             back_temp_emb = True
 
     print("Initializing model...")
-    model = LitModel(loss_type=args.loss_type, 
+    checkpoint_dir = 'checkpoints'
+    if args.continue_training:
+        print(f"Continuing training from checkpoint: {args.continue_training}")
+        model = LitModel.load_from_checkpoint(checkpoint_dir + '/' + args.continue_training, loss_type=args.loss_type, similarity_type=args.similarity_type, temperature=args.temperature, variance_lambda=args.variance_lambda, use_random_window=args.use_random_window, use_center_window=args.use_center_window, window_size=args.window_size, use_align_alpha=args.use_align_alpha, align_alpha_strength=args.align_alpha_strength, do_not_reduce_frame_rate=args.do_not_reduce_frame_rate, small_embedder=args.small_embedder, dont_stack=args.dont_stack)
+        # print('args.dont_stack:', args.dont_stack)
+        # model.dont_stack = args.dont_stack
+        print('model.dont_stack:', model.dont_stack)
+        print('use_center_window:', model.use_center_window)
+    else:
+        model = LitModel(loss_type=args.loss_type, 
                      similarity_type=args.similarity_type, 
                      temperature=args.temperature, 
                      variance_lambda=args.variance_lambda, 
@@ -417,12 +459,12 @@ def train(args):
                      use_center_window=args.use_center_window, 
                      window_size=args.window_size)
 
-    base_model_stats = count_model_parameters(model.model.cnn, "BaseModel")
-    conv_embedder_stats = count_model_parameters(model.model.emb, "ConvEmbedder")
+    # base_model_stats = count_model_parameters(model.model.cnn, "BaseModel")
+    # conv_embedder_stats = count_model_parameters(model.model.emb, "ConvEmbedder")
     # print_parameter_details(model.model.cnn, "BaseModel")
-    print_parameter_details(model.model.emb, "ConvEmbedder")
+    # print_parameter_details(model.model.emb, "ConvEmbedder")
     print('Model initialized!')
-    print(model)
+    # print(model)
 
     print("Setting up training callbacks and logger...")
     filename = 'model-{epoch:02d}-{val_loss:.2f}' if args.validate else 'model-{epoch:02d}-{train_loss:.2f}'
@@ -464,6 +506,7 @@ def train(args):
         trainer.fit(model, train_loader, val_loader)
     else:
         # trainer.fit(model, train_loader, train_loader)
+        # print("model.dont_stack:", model.dont_stack)
         trainer.fit(model, train_loader)
     print("Training complete!")
 
@@ -499,6 +542,8 @@ if __name__ == "__main__":
         parser.add_argument('--small_embedder', action='store_true', help='Whether to use a smaller embedder')           # reduce channels from 512 to 256
         parser.add_argument('--use_batch_minlen', action='store_true', help='Whether to use the shortest video length within a batch, rather than the whole dataset')         # To keep the frames as many as possible
         parser.add_argument('--epoch', type=int, default=500, help='Number of epochs to train')
+        parser.add_argument('--continue_training', type=str, default='', help='Continue training from a specific checkpoint')
+        parser.add_argument('--schedule_window', action='store_true', help='Whether to schedule window size')
         return parser.parse_args()
 
     args = parse_args()
@@ -509,13 +554,13 @@ if __name__ == "__main__":
     print("--------------------------------- Starting Training ---------------------------------")
     train(args)
     print("--------------------------------- Training Complete ---------------------------------")
-    print("------------------------------------------------------------------------------------")
-    print("--------------------------------- Use center window ---------------------------------")
-    args.use_center_window = True
-    args.use_random_window = False
-    args.epoch = 1000
-    train(args)
-    print("------------------------------------------------------------------------------------")
+    # print("------------------------------------------------------------------------------------")
+    # print("--------------------------------- Use center window ---------------------------------")
+    # args.use_center_window = True
+    # args.use_random_window = False
+    # args.epoch = 1000
+    # train(args)
+    # print("------------------------------------------------------------------------------------")
 
     # align_alpha_strengths = [0.1, 0.3, 1.0, 3.0, 10.0]
     # for align_alpha_strength in align_alpha_strengths:
